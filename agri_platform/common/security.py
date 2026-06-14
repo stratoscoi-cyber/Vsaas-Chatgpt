@@ -46,3 +46,34 @@ def install_auth(
             )
         g.api_key = key
         return None
+
+
+def install_admin_auth(
+    app: Flask,
+    admin_keys: FrozenSet[str],
+    prefix: str = "/api/admin",
+) -> None:
+    """Protect admin endpoints with a dedicated ``X-Admin-Key`` (or Bearer).
+
+    If no admin keys are configured the admin surface is *disabled* (403) rather
+    than left open — administration cannot happen without an explicit key.
+    """
+
+    @app.before_request
+    def _authorize_admin():
+        if not request.path.startswith(prefix) or request.method == "OPTIONS":
+            return None
+        if not admin_keys:
+            return (
+                jsonify({"error": {"code": "admin_disabled",
+                                   "message": "admin API disabled; set ADMIN_API_KEYS to enable"}}),
+                403,
+            )
+        key = request.headers.get("X-Admin-Key") or _extract_key()
+        if not key or key not in admin_keys:
+            return (
+                jsonify({"error": {"code": "forbidden", "message": "valid admin key required"}}),
+                403,
+            )
+        g.admin_key = key
+        return None

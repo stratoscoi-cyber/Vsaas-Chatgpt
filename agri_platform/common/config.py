@@ -38,6 +38,7 @@ class Settings:
     database_url: str
     # Security
     api_keys: FrozenSet[str] = field(default_factory=frozenset)
+    admin_api_keys: FrozenSet[str] = field(default_factory=frozenset)
     auth_enabled: bool = False
     # Rate limiting (requests / minute / client). 0 disables.
     rate_limit_per_minute: int = 0
@@ -78,6 +79,7 @@ class Settings:
             service=service,
             database_url=os.getenv("DATABASE_URL", default_db),
             api_keys=_keys("API_KEYS"),
+            admin_api_keys=_keys("ADMIN_API_KEYS"),
             auth_enabled=_bool("AUTH_ENABLED", False),
             rate_limit_per_minute=_int("RATE_LIMIT_PER_MINUTE", 0),
             redis_url=os.getenv("REDIS_URL"),

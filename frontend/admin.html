@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>prisaMove — Admin · Tax & Statutory</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #0c1117; color: #e8edf2; }
+    header { padding: 14px 20px; background: #11161d; border-bottom: 1px solid #2a3645; display: flex; gap: 12px; align-items: baseline; }
+    header h1 { margin: 0; font-size: 18px; color: #46b06a; }
+    header span { color: #8aa0b4; font-size: 12px; }
+    header a { margin-left: auto; color: #8aa0b4; font-size: 13px; }
+    main { display: grid; grid-template-columns: 380px 1fr; gap: 16px; padding: 16px; }
+    .card { background: #11161d; border: 1px solid #2a3645; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #8aa0b4; margin: 0 0 10px; }
+    label { display: block; font-size: 12px; margin: 8px 0 3px; color: #aebfce; }
+    input, select { width: 100%; padding: 7px 8px; border-radius: 6px; border: 1px solid #2a3645; background: #0c1117; color: #e8edf2; font-size: 13px; }
+    .row { display: flex; gap: 8px; } .row > * { flex: 1; }
+    button { margin-top: 10px; padding: 8px 11px; border: 0; border-radius: 6px; background: #2f7d4f; color: #fff; font-size: 13px; cursor: pointer; }
+    button.ghost { background: #243140; }
+    button.danger { background: #b4471f; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a3645; }
+    th { color: #8aa0b4; font-weight: 600; }
+    .muted { color: #8aa0b4; font-size: 12px; }
+    .banner { background: #2a1d12; border: 1px solid #5a3a1f; color: #e8c9a8; padding: 8px 10px; border-radius: 6px; font-size: 12px; margin-bottom: 10px; }
+    pre { white-space: pre-wrap; font-size: 12px; background: #0c1117; border: 1px solid #2a3645; border-radius: 6px; padding: 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>prisaMove · Admin</h1>
+    <span>Tax / VAT / statutory payments</span>
+    <a href="marketplace.html">← Marketplace</a>
+  </header>
+  <main>
+    <div>
+      <div class="card">
+        <h2>Connection</h2>
+        <label>LGaaS base URL</label><input id="base" value="http://localhost:5003" />
+        <label>Admin API key (X-Admin-Key)</label><input id="key" type="password" placeholder="ADMIN_API_KEYS value" />
+        <button id="connect">Connect</button>
+      </div>
+      <div class="card">
+        <div class="banner">Enter the real statutory rates for each jurisdiction. The
+          platform ships with none and computes tax only from what you configure here.</div>
+        <h2>Add / edit tax rule</h2>
+        <div class="row">
+          <div><label>Code</label><input id="f_code" placeholder="NG-VAT" /></div>
+          <div><label>Region</label><select id="f_region"></select></div>
+        </div>
+        <label>Name</label><input id="f_name" placeholder="Value Added Tax" />
+        <div class="row">
+          <div><label>Type</label>
+            <select id="f_type"><option>vat</option><option>gst</option><option>withholding</option><option>levy</option><option>excise</option><option>other</option></select>
+          </div>
+          <div><label>Collection</label>
+            <select id="f_collection"><option value="add">add (on top)</option><option value="withhold">withhold</option></select>
+          </div>
+        </div>
+        <div class="row">
+          <div><label>Rate %</label><input id="f_rate" placeholder="7.5" /></div>
+          <div><label>Basis</label><select id="f_basis"><option value="net">net</option><option value="compound">compound</option></select></div>
+        </div>
+        <div class="row">
+          <div><label>Applies to (comma)</label><input id="f_applies" placeholder="transport_service" /></div>
+          <div><label>Threshold min</label><input id="f_threshold" placeholder="0" /></div>
+        </div>
+        <div class="row">
+          <div><label>Sequence</label><input id="f_seq" placeholder="0" /></div>
+          <div><label>Effective from</label><input id="f_from" placeholder="2026-01-01" /></div>
+          <div><label>Effective to</label><input id="f_to" placeholder="(open)" /></div>
+        </div>
+        <label>Statutory reference (audit)</label><input id="f_ref" placeholder="e.g. VAT Act s.4 (operator verified)" />
+        <button id="save">Save rule</button>
+        <button id="clear" class="ghost">Clear</button>
+      </div>
+      <div class="card">
+        <h2>Tax quote calculator</h2>
+        <div class="row">
+          <div><label>Base amount</label><input id="q_base" value="1000" /></div>
+          <div><label>Region</label><select id="q_region"></select></div>
+          <div><label>Currency</label><input id="q_currency" value="USD" /></div>
+        </div>
+        <button id="quote" class="ghost">Compute tax</button>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>Configured rules</h2>
+        <button id="reload" class="ghost">Reload</button>
+        <table id="rules"><thead><tr><th>Code</th><th>Region</th><th>Type</th><th>Mode</th><th>Rate</th><th>Active</th><th></th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card"><h2>Output</h2><pre id="out">Connect with an admin key to begin.</pre></div>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const base = () => $("base").value.replace(/\/$/, "");
+    const out = (o) => { $("out").textContent = typeof o === "string" ? o : JSON.stringify(o, null, 2); };
+    const adminHeaders = () => ({ "Content-Type": "application/json", "X-Admin-Key": $("key").value });
+
+    async function api(path, opts = {}) {
+      const r = await fetch(base() + path, opts);
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((body.error && body.error.message) || ("HTTP " + r.status));
+      return body;
+    }
+
+    async function loadRegions() {
+      try {
+        const { regions, default: def } = await api("/api/regions");
+        const opts = ['<option value="*">* (all regions)</option>']
+          .concat(regions.map((r) => `<option value="${r.code}">${r.code} — ${r.name} (${r.currency})</option>`));
+        $("f_region").innerHTML = opts.join("");
+        $("q_region").innerHTML = regions.map((r) => `<option value="${r.code}">${r.code} — ${r.name}</option>`).join("");
+      } catch (e) { out("Error loading regions: " + e.message); }
+    }
+
+    $("connect").onclick = async () => { await loadRules(); out("Connected."); };
+    $("reload").onclick = loadRules;
+
+    async function loadRules() {
+      try {
+        const { tax_rules } = await api("/api/admin/tax-rules", { headers: adminHeaders() });
+        const tb = $("rules").querySelector("tbody");
+        tb.innerHTML = tax_rules.map((r) => `<tr>
+          <td>${r.code}</td><td>${r.region_code}</td><td>${r.tax_type}</td><td>${r.collection}</td>
+          <td>${r.rate_percent}%</td><td>${r.active}</td>
+          <td><button class="ghost" data-edit='${encodeURIComponent(JSON.stringify(r))}'>edit</button>
+              <button class="danger" data-del="${r.code}">disable</button></td></tr>`).join("")
+          || '<tr><td colspan="7" class="muted">No rules configured yet.</td></tr>';
+        tb.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => fillForm(JSON.parse(decodeURIComponent(b.dataset.edit))));
+        tb.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
+          try { await api(`/api/admin/tax-rules/${b.dataset.del}`, { method: "DELETE", headers: adminHeaders() }); await loadRules(); }
+          catch (e) { out("Error: " + e.message); }
+        });
+      } catch (e) { out("Error: " + e.message); }
+    }
+
+    function fillForm(r) {
+      $("f_code").value = r.code; $("f_region").value = r.region_code; $("f_name").value = r.name || "";
+      $("f_type").value = r.tax_type || "vat"; $("f_collection").value = r.collection; $("f_rate").value = r.rate_percent;
+      $("f_basis").value = r.basis || "net"; $("f_applies").value = (r.applies_to || []).join(",");
+      $("f_threshold").value = r.threshold_min || 0; $("f_seq").value = r.sequence || 0;
+      $("f_from").value = r.effective_from || ""; $("f_to").value = r.effective_to || ""; $("f_ref").value = r.statutory_reference || "";
+      out("Editing " + r.code + " — Save will update it.");
+    }
+    $("clear").onclick = () => document.querySelectorAll("[id^=f_]").forEach((e) => { if (e.tagName === "INPUT") e.value = ""; });
+
+    $("save").onclick = async () => {
+      const payload = {
+        code: $("f_code").value, region_code: $("f_region").value, name: $("f_name").value,
+        tax_type: $("f_type").value, collection: $("f_collection").value, rate_percent: parseFloat($("f_rate").value),
+        basis: $("f_basis").value, applies_to: $("f_applies").value.split(",").map((s) => s.trim()).filter(Boolean),
+        threshold_min: parseFloat($("f_threshold").value || "0"), sequence: parseInt($("f_seq").value || "0"),
+        effective_from: $("f_from").value || null, effective_to: $("f_to").value || null,
+        statutory_reference: $("f_ref").value || null, active: true,
+      };
+      try {
+        // Update if it exists, else create.
+        let exists = false;
+        try { await api(`/api/admin/tax-rules/${payload.code}`, { headers: adminHeaders() }); exists = true; } catch (_) {}
+        const path = `/api/admin/tax-rules${exists ? "/" + payload.code : ""}`;
+        const res = await api(path, { method: exists ? "PUT" : "POST", headers: adminHeaders(), body: JSON.stringify(payload) });
+        out(res); await loadRules();
+      } catch (e) { out("Error: " + e.message); }
+    };
+
+    $("quote").onclick = async () => {
+      try {
+        out(await api("/api/tax/quote", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_amount: parseFloat($("q_base").value), region_code: $("q_region").value, currency: $("q_currency").value }) }));
+      } catch (e) { out("Error: " + e.message); }
+    };
+
+    loadRegions();
+  </script>
+</body>
+</html>

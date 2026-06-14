@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.types import JSON
 
@@ -129,6 +129,72 @@ class Offer(Base):
             "round": self.round,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class TaxRule(Base):
+    """An operator-configured statutory tax / VAT / levy rule.
+
+    Rates and applicability are entered and maintained by an administrator; the
+    system ships with none. ``statutory_reference`` lets the operator record the
+    legal basis for audit.
+    """
+
+    __tablename__ = "tax_rules"
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String(40), unique=True, nullable=False, index=True)  # e.g. "NG-VAT"
+    region_code = Column(String(8), index=True)  # ISO-3166 alpha-2, or "*" for all regions
+    name = Column(String(120))
+    tax_type = Column(String(30))   # vat | gst | withholding | levy | excise | other
+    collection = Column(String(12))  # add | withhold
+    rate_percent = Column(Float)
+    basis = Column(String(12), default="net")  # net | compound
+    applies_to = Column(JSON, default=list)     # categories; empty = all
+    threshold_min = Column(Float, default=0.0)  # minimum base for the rule to apply
+    sequence = Column(Integer, default=0)       # application order
+    effective_from = Column(String(10))         # ISO date (inclusive)
+    effective_to = Column(String(10))           # ISO date (inclusive); null = open
+    statutory_reference = Column(String(300))   # operator-recorded legal basis
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "code": self.code,
+            "region_code": self.region_code,
+            "name": self.name,
+            "tax_type": self.tax_type,
+            "collection": self.collection,
+            "rate_percent": self.rate_percent,
+            "basis": self.basis,
+            "applies_to": self.applies_to or [],
+            "threshold_min": self.threshold_min,
+            "sequence": self.sequence,
+            "effective_from": self.effective_from,
+            "effective_to": self.effective_to,
+            "statutory_reference": self.statutory_reference,
+            "active": self.active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    def to_rule(self):
+        """Plain dict consumed by the tax engine."""
+        return {
+            "code": self.code,
+            "name": self.name,
+            "tax_type": self.tax_type,
+            "collection": self.collection,
+            "rate_percent": self.rate_percent,
+            "basis": self.basis or "net",
+            "applies_to": self.applies_to or [],
+            "threshold_min": self.threshold_min or 0.0,
+            "sequence": self.sequence or 0,
+            "effective_from": self.effective_from,
+            "effective_to": self.effective_to,
+            "active": self.active,
         }
 
 

@@ -124,6 +124,8 @@ hazards (`POST/GET /api/hazards`, `DELETE /api/hazards/{id}`) ·
 | `POST /api/offers/{id}/haggle` | **AI culturally-aware counter-offer suggestion** |
 | `GET /api/loads/{ref}/messages` | negotiation thread |
 | `GET /api/negotiation-styles` | available negotiation-style profiles |
+| `POST /api/tax/quote` | compute statutory tax for an amount (admin-configured rules) |
+| `/api/admin/tax-rules*` | **admin-only** tax/VAT/levy rule management (`X-Admin-Key`) |
 
 ```bash
 # Post a load, get a fair quote, bid, then ask the AI to haggle as the shipper
@@ -192,6 +194,50 @@ curl -s localhost:5003/api/offers/1/haggle -H 'content-type: application/json' \
 > The negotiation-style profiles and language catalogs are configurable
 > conventions, not assumptions about individuals; extend or override them freely.
 
+## Tax / VAT / statutory payments (admin-managed)
+
+Tax is computed by an engine (`common/tax.py`) that applies **operator-configured
+rules** — the platform **ships with no rates**. Statutory rates differ by
+jurisdiction and change by law, so an administrator enters and maintains the real
+rates; until then the computed tax is zero and the response says `configured:
+false` (never a guessed rate). The maths is exact `Decimal` arithmetic, fully
+tested — a real calculation, not a simulation.
+
+- **Collection modes**: `add` (VAT/GST/levies added to the buyer's total) and
+  `withhold` (withholding tax deducted from the carrier's payout and remitted).
+- **Basis**: `net` or `compound` (tax-on-tax) where a jurisdiction requires it.
+- **Rule fields**: region (ISO-2 or `*`), rate, type, applicability (categories),
+  threshold, sequence, effective-from/to dates, and a `statutory_reference` field
+  for the legal basis (audit).
+
+**Admin API** (`/api/admin/tax-rules`, LGaaS) is protected by a dedicated
+`X-Admin-Key` and is **disabled until `ADMIN_API_KEYS` is set** (it is never
+left open):
+
+| Method & path | Purpose |
+|---------------|---------|
+| `POST /api/admin/tax-rules` | create a rule |
+| `GET /api/admin/tax-rules` · `GET /api/admin/tax-rules/{code}` | list / fetch |
+| `PUT /api/admin/tax-rules/{code}` | update |
+| `DELETE /api/admin/tax-rules/{code}` | disable (`?hard=true` to remove) |
+| `POST /api/tax/quote` | compute tax for an amount (public) |
+
+Configured taxes are automatically included in `POST /api/loads/{ref}/estimate`
+and `POST /api/estimate` responses for the load's region. The admin UI is
+`frontend/admin.html`.
+
+```bash
+# Enable admin, add a real (operator-verified) VAT rule, then quote
+export ADMIN_API_KEYS=changeme
+curl -s localhost:5003/api/admin/tax-rules -H "X-Admin-Key: changeme" \
+  -H 'content-type: application/json' -d '{
+    "code":"NG-VAT","region_code":"NG","name":"VAT","tax_type":"vat",
+    "collection":"add","rate_percent":7.5,"applies_to":["transport_service"],
+    "statutory_reference":"operator-supplied"}'
+curl -s localhost:5003/api/tax/quote -H 'content-type: application/json' \
+  -d '{"base_amount":1000,"region_code":"NG","currency":"NGN"}'
+```
+
 ## Configuration
 
 | Env var | Default | Used by |
@@ -199,6 +245,7 @@ curl -s localhost:5003/api/offers/1/haggle -H 'content-type: application/json' \
 | `DATABASE_URL` | `sqlite:///<service>.db` | all |
 | `REDIS_URL` | _unset → in-memory cache_ | wfaas, lgaas |
 | `AUTH_ENABLED` / `API_KEYS` | `false` / _empty_ | all |
+| `ADMIN_API_KEYS` | _empty → admin disabled_ | lgaas (tax admin) |
 | `RATE_LIMIT_PER_MINUTE` | `0` (off) | all |
 | `VALHALLA_URL` | _unset → straight-line_ | traas |
 | `OPEN_METEO_URL` | Open-Meteo public API | wfaas |
@@ -223,7 +270,7 @@ routing / inference collaborators — no network required.
 ```
 agri_platform/
   common/        config, logging, errors, security, ratelimit, cache, pagination,
-                 geo, weather, db, regions, i18n, localization
+                 geo, weather, db, regions, i18n, localization, tax
   wfaas/         models, service, notifications, monitoring, ai, app, wsgi, Dockerfile
   traas/         models, routing, service, app, wsgi, Dockerfile
   marketplace/   models, pricing, negotiation, service, app, wsgi, Dockerfile   (LGaaS / prisaMove)
