@@ -1,0 +1,11 @@
+# Runtime dependencies for the WFAAS, TRAAS and LGaaS (prisaMove) services.
+Flask>=3.0,<4.0
+SQLAlchemy>=2.0,<3.0
+requests>=2.31
+gunicorn>=21.2
+alembic>=1.13          # database migrations
+APScheduler>=3.10      # background hazard monitoring (WFAAS)
+redis>=5.0             # shared cache (optional; falls back to in-memory)
+# PostgreSQL driver (used when DATABASE_URL points at Postgres/PostGIS;
+# the services fall back to SQLite without it).
+psycopg2-binary>=2.9

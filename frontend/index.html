@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agri-Travel GIS Dashboard</title>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    :root { --panel: 340px; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; }
+    #map { position: absolute; inset: 0 0 0 var(--panel); }
+    #panel {
+      position: absolute; top: 0; left: 0; bottom: 0; width: var(--panel);
+      padding: 16px; overflow-y: auto; background: #11161d; color: #e8edf2;
+    }
+    h1 { font-size: 17px; margin: 0 0 4px; }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #8aa0b4; margin: 18px 0 8px; }
+    p.sub { margin: 0 0 12px; color: #8aa0b4; font-size: 12px; }
+    label { display: block; font-size: 12px; margin: 8px 0 3px; color: #aebfce; }
+    input, select { width: 100%; padding: 7px 8px; border-radius: 6px; border: 1px solid #2a3645;
+                    background: #0c1117; color: #e8edf2; font-size: 13px; }
+    button { width: 100%; margin-top: 10px; padding: 9px; border: 0; border-radius: 6px;
+             background: #2f7d4f; color: #fff; font-size: 13px; cursor: pointer; }
+    button.alt { background: #b4471f; }
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+    .hint { font-size: 11px; color: #6f8295; margin-top: 6px; }
+    #out { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 11px;
+           background: #0c1117; border: 1px solid #2a3645; border-radius: 6px; padding: 8px;
+           margin-top: 12px; max-height: 220px; overflow: auto; }
+    .legend span { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <h1>🌾 Agri-Travel GIS</h1>
+    <p class="sub">Hazard-aware logistics routing for agricultural supply chains.
+      <a href="marketplace.html" style="color:#46b06a;">Open prisaMove marketplace →</a></p>
+
+    <h2>Endpoints</h2>
+    <label>TRAAS base URL</label>
+    <input id="traas" value="http://localhost:5002" />
+    <label>WFAAS base URL</label>
+    <input id="wfaas" value="http://localhost:5001" />
+
+    <h2>Route</h2>
+    <div class="row">
+      <div><label>Origin lat</label><input id="oLat" value="10.5105" /></div>
+      <div><label>Origin lon</label><input id="oLon" value="7.4165" /></div>
+    </div>
+    <div class="row">
+      <div><label>Dest lat</label><input id="dLat" value="11.8333" /></div>
+      <div><label>Dest lon</label><input id="dLon" value="13.1500" /></div>
+    </div>
+    <label>Vehicle</label>
+    <select id="vehicle">
+      <option value="agricultural_vehicle">Agricultural vehicle</option>
+      <option value="heavy_truck">Heavy truck</option>
+      <option value="light_vehicle">Light vehicle</option>
+      <option value="drone_delivery">Drone delivery</option>
+    </select>
+    <button id="route">Compute safe route</button>
+
+    <h2>Hazards</h2>
+    <p class="hint">Click the map to drop a hazard, then add it.</p>
+    <div class="row">
+      <div><label>Type</label>
+        <select id="hType">
+          <option value="safety">Banditry / safety</option>
+          <option value="red_zone">Red zone</option>
+          <option value="weather">Weather</option>
+          <option value="flood">Flood</option>
+          <option value="traffic">Traffic</option>
+        </select>
+      </div>
+      <div><label>Radius km</label><input id="hRadius" value="3" /></div>
+    </div>
+    <button id="addHazard" class="alt">Add hazard at pin</button>
+    <button id="loadHazards">Reload hazards</button>
+
+    <div class="legend" style="margin-top:14px;font-size:12px;color:#aebfce">
+      <div><span style="background:#2f7d4f"></span>Safe route</div>
+      <div><span style="background:#d23b3b;opacity:.5"></span>Hazard zone</div>
+    </div>
+
+    <div id="out">Ready.</div>
+  </div>
+  <div id="map"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const out = (o) => { $("out").textContent = typeof o === "string" ? o : JSON.stringify(o, null, 2); };
+    const traas = () => $("traas").value.replace(/\/$/, "");
+    const wfaas = () => $("wfaas").value.replace(/\/$/, "");
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: {
+        version: 8,
+        sources: { osm: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+                          tileSize: 256, attribution: "© OpenStreetMap contributors" } },
+        layers: [{ id: "osm", type: "raster", source: "osm" }],
+      },
+      center: [10.0, 11.0], zoom: 6,
+    });
+
+    let pin = null;
+    map.on("load", () => {
+      map.addSource("route", { type: "geojson", data: empty() });
+      map.addLayer({ id: "route", type: "line", source: "route",
+        paint: { "line-color": "#2f7d4f", "line-width": 4 },
+        layout: { "line-join": "round", "line-cap": "round" } });
+      map.addSource("hazards", { type: "geojson", data: empty() });
+      map.addLayer({ id: "hazards-fill", type: "fill", source: "hazards",
+        paint: { "fill-color": "#d23b3b", "fill-opacity": 0.35 } });
+      map.addLayer({ id: "hazards-line", type: "line", source: "hazards",
+        paint: { "line-color": "#a31515", "line-width": 1.5 } });
+      loadHazards();
+    });
+
+    map.on("click", (e) => {
+      if (pin) pin.remove();
+      pin = new maplibregl.Marker({ color: "#b4471f" }).setLngLat(e.lngLat).addTo(map);
+    });
+
+    function empty() { return { type: "FeatureCollection", features: [] }; }
+
+    // [lat,lon] pairs -> GeoJSON LineString ([lon,lat]).
+    function toLine(coords) {
+      return { type: "FeatureCollection", features: [{ type: "Feature",
+        geometry: { type: "LineString", coordinates: coords.map((c) => [c[1], c[0]]) }, properties: {} }] };
+    }
+
+    async function api(url, opts) {
+      const r = await fetch(url, opts);
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || ("HTTP " + r.status));
+      return body;
+    }
+
+    $("route").onclick = async () => {
+      try {
+        out("Routing…");
+        const body = await api(traas() + "/api/routes/optimize", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            origin: [parseFloat($("oLat").value), parseFloat($("oLon").value)],
+            destination: [parseFloat($("dLat").value), parseFloat($("dLon").value)],
+            vehicle_type: $("vehicle").value,
+          }),
+        });
+        const coords = body.route.path || [];
+        map.getSource("route").setData(toLine(coords));
+        if (coords.length) {
+          const b = new maplibregl.LngLatBounds();
+          coords.forEach((c) => b.extend([c[1], c[0]]));
+          map.fitBounds(b, { padding: 60 });
+        }
+        out({ distance_km: body.route.distance_km, duration_min: body.route.duration_min,
+              safety: body.safety, cost: body.cost });
+      } catch (err) { out("Error: " + err.message); }
+    };
+
+    $("addHazard").onclick = async () => {
+      if (!pin) return out("Click the map first to place a pin.");
+      try {
+        const ll = pin.getLngLat();
+        await api(traas() + "/api/hazards", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hazard_type: $("hType").value, severity: "High",
+            location: { lat: ll.lat, lon: ll.lng }, radius_km: parseFloat($("hRadius").value) }),
+        });
+        await loadHazards();
+        out("Hazard added.");
+      } catch (err) { out("Error: " + err.message); }
+    };
+
+    $("loadHazards").onclick = loadHazards;
+
+    async function loadHazards() {
+      try {
+        const body = await api(traas() + "/api/hazards");
+        const features = body.hazards.map((h) => ({
+          type: "Feature", properties: { type: h.hazard_type },
+          geometry: h.geometry && h.geometry.type === "Polygon"
+            ? h.geometry
+            : { type: "Polygon", coordinates: [ring(h.location.lat, h.location.lon, h.radius_km || 2)] },
+        }));
+        if (map.getSource("hazards")) map.getSource("hazards").setData({ type: "FeatureCollection", features });
+      } catch (err) { out("Error loading hazards: " + err.message); }
+    }
+
+    // Approximate circular [lon,lat] ring (mirrors the backend buffer_point_ring).
+    function ring(lat, lon, km) {
+      const dLat = km / 111.32, dLon = km / (111.32 * Math.max(0.01, Math.cos(lat * Math.PI / 180)));
+      const r = [];
+      for (let i = 0; i < 24; i++) { const t = 2 * Math.PI * i / 24;
+        r.push([lon + dLon * Math.cos(t), lat + dLat * Math.sin(t)]); }
+      r.push(r[0]);
+      return r;
+    }
+  </script>
+</body>
+</html>

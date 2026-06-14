@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run test suite
+        run: pytest -q
+
+      - name: Verify migrations apply on a fresh database
+        run: |
+          DATABASE_URL=sqlite:///ci_wfaas.db alembic -c alembic-wfaas.ini upgrade head
+          DATABASE_URL=sqlite:///ci_traas.db alembic -c alembic-traas.ini upgrade head
+          DATABASE_URL=sqlite:///ci_lgaas.db alembic -c alembic-lgaas.ini upgrade head

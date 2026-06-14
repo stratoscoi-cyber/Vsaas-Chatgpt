@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agri-platform"
+version = "0.1.0"
+description = "Agriculture + travel/routing GIS platform (weather, agronomy, hazard-aware routing, drones)"
+requires-python = ">=3.10"
+dependencies = [
+    "Flask>=3.0,<4.0",
+    "SQLAlchemy>=2.0,<3.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+server = ["gunicorn>=21.2", "psycopg2-binary>=2.9"]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["agri_platform*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

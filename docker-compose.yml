@@ -1,0 +1,119 @@
+# Orchestrates the full agri-travel-logistics platform.
+#
+#   cp .env.example .env && docker compose up --build
+#
+# Services:
+#   wfaas      Weather & agronomy API       -> http://localhost:5001
+#   traas      Routing API                  -> http://localhost:5002
+#   lgaas      Logistics marketplace (prisaMove) -> http://localhost:5003
+#   frontend   MapLibre dashboard + prisaMove board -> http://localhost:8080
+#   valhalla   Open-source routing engine
+#   redis      Shared cache
+#   postgres-* Per-service PostGIS databases
+#
+# Valhalla is optional: with no tiles, TRAAS falls back to a straight-line
+# engine so the stack still runs end-to-end.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  postgres-wfaas:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: wfaas
+    volumes:
+      - wfaas_pg:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+
+  postgres-traas:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: traas
+    volumes:
+      - traas_pg:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+
+  postgres-lgaas:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: lgaas
+    volumes:
+      - lgaas_pg:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"
+
+  valhalla:
+    image: ghcr.io/gis-ops/valhalla:latest
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./valhalla_data:/custom_files
+
+  wfaas:
+    build:
+      context: .
+      dockerfile: agri_platform/wfaas/Dockerfile
+    depends_on: [postgres-wfaas, redis]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:-postgres}@postgres-wfaas:5432/wfaas
+      REDIS_URL: redis://redis:6379/0
+      OPEN_METEO_URL: https://api.open-meteo.com/v1/forecast
+      AUTH_ENABLED: "${AUTH_ENABLED:-false}"
+      API_KEYS: "${API_KEYS:-}"
+      RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-0}"
+      MONITOR_ENABLED: "${MONITOR_ENABLED:-false}"
+    ports:
+      - "5001:5001"
+
+  traas:
+    build:
+      context: .
+      dockerfile: agri_platform/traas/Dockerfile
+    depends_on: [postgres-traas, valhalla]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:-postgres}@postgres-traas:5432/traas
+      VALHALLA_URL: http://valhalla:8002/route
+      AUTH_ENABLED: "${AUTH_ENABLED:-false}"
+      API_KEYS: "${API_KEYS:-}"
+      RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-0}"
+    ports:
+      - "5002:5002"
+
+  lgaas:
+    build:
+      context: .
+      dockerfile: agri_platform/marketplace/Dockerfile
+    depends_on: [postgres-lgaas, redis]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:-postgres}@postgres-lgaas:5432/lgaas
+      REDIS_URL: redis://redis:6379/1
+      AUTH_ENABLED: "${AUTH_ENABLED:-false}"
+      API_KEYS: "${API_KEYS:-}"
+      RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-0}"
+      HAGGLE_AI_ENDPOINT: "${HAGGLE_AI_ENDPOINT:-}"
+    ports:
+      - "5003:5003"
+
+  frontend:
+    image: nginx:alpine
+    depends_on: [wfaas, traas, lgaas]
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    ports:
+      - "8080:80"
+
+volumes:
+  wfaas_pg:
+  traas_pg:
+  lgaas_pg:

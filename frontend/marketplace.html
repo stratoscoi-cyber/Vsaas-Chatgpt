@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>prisaMove — Logistics Marketplace</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #0c1117; color: #e8edf2; }
+    header { padding: 14px 20px; background: #11161d; border-bottom: 1px solid #2a3645; display: flex; align-items: baseline; gap: 12px; }
+    header h1 { margin: 0; font-size: 20px; color: #46b06a; }
+    header span { color: #8aa0b4; font-size: 12px; }
+    header a { margin-left: auto; color: #8aa0b4; font-size: 13px; }
+    main { display: grid; grid-template-columns: 360px 1fr; gap: 16px; padding: 16px; }
+    .card { background: #11161d; border: 1px solid #2a3645; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #8aa0b4; margin: 0 0 10px; }
+    label { display: block; font-size: 12px; margin: 8px 0 3px; color: #aebfce; }
+    input, select, textarea { width: 100%; padding: 7px 8px; border-radius: 6px; border: 1px solid #2a3645; background: #0c1117; color: #e8edf2; font-size: 13px; }
+    .row { display: flex; gap: 8px; } .row > * { flex: 1; }
+    button { margin-top: 10px; padding: 9px 12px; border: 0; border-radius: 6px; background: #2f7d4f; color: #fff; font-size: 13px; cursor: pointer; }
+    button.ghost { background: #243140; }
+    .load { border: 1px solid #2a3645; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+    .load h3 { margin: 0 0 4px; font-size: 15px; }
+    .pill { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 10px; background: #243140; color: #aebfce; margin-right: 5px; }
+    .muted { color: #8aa0b4; font-size: 12px; }
+    pre { white-space: pre-wrap; font-size: 12px; background: #0c1117; border: 1px solid #2a3645; border-radius: 6px; padding: 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>prisaMove</h1>
+    <span>Logistics as a Service · LGaaS</span>
+    <a href="index.html">← GIS dashboard</a>
+  </header>
+  <main>
+    <div>
+      <div class="card">
+        <h2>API</h2>
+        <label>LGaaS base URL</label>
+        <input id="base" value="http://localhost:5003" />
+      </div>
+      <div class="card">
+        <h2>Post a load</h2>
+        <label>Shipper ID</label><input id="shipper" value="farmer-1" />
+        <label>Title</label><input id="title" value="Tomatoes (perishable)" />
+        <div class="row">
+          <div><label>Weight (kg)</label><input id="weight" value="8000" /></div>
+          <div><label>Type</label>
+            <select id="ltype">
+              <option value="perishable_produce">Perishable produce</option>
+              <option value="grain">Grain</option>
+              <option value="livestock">Livestock</option>
+              <option value="equipment">Equipment</option>
+              <option value="fertilizer">Fertilizer</option>
+              <option value="general">General</option>
+            </select>
+          </div>
+        </div>
+        <label>Classifications (comma)</label><input id="classes" value="refrigerated" />
+        <div class="row">
+          <div><label>Origin lat,lon</label><input id="orig" value="10.5,7.4" /></div>
+          <div><label>Dest lat,lon</label><input id="dest" value="11.8,13.1" /></div>
+        </div>
+        <label>Budget (optional)</label><input id="budget" placeholder="e.g. 900" />
+        <button id="post">Post load</button>
+        <button id="quote" class="ghost">Quick quote only</button>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>Open loads</h2>
+        <button id="reload" class="ghost">Reload</button>
+        <div id="loads"></div>
+      </div>
+      <div class="card">
+        <h2>Activity</h2>
+        <pre id="out">Ready.</pre>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const base = () => $("base").value.replace(/\/$/, "");
+    const out = (o) => { $("out").textContent = typeof o === "string" ? o : JSON.stringify(o, null, 2); };
+    const ll = (s) => { const [a, b] = s.split(",").map(Number); return { lat: a, lon: b }; };
+
+    async function api(path, opts) {
+      const r = await fetch(base() + path, opts);
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((body.error && body.error.message) || ("HTTP " + r.status));
+      return body;
+    }
+    const jsonPost = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+    function loadPayload() {
+      const classes = $("classes").value.split(",").map((s) => s.trim()).filter(Boolean);
+      const p = {
+        shipper_id: $("shipper").value, title: $("title").value,
+        weight_kg: parseFloat($("weight").value), load_type: $("ltype").value,
+        classifications: classes, origin: ll($("orig").value), destination: ll($("dest").value),
+      };
+      if ($("budget").value) p.budget = parseFloat($("budget").value);
+      return p;
+    }
+
+    $("post").onclick = async () => {
+      try { const load = await api("/api/loads", jsonPost(loadPayload())); out(load); await loadList(); }
+      catch (e) { out("Error: " + e.message); }
+    };
+    $("quote").onclick = async () => {
+      try { out(await api("/api/estimate", jsonPost(loadPayload()))); }
+      catch (e) { out("Error: " + e.message); }
+    };
+    $("reload").onclick = loadList;
+
+    async function loadList() {
+      try {
+        const { loads } = await api("/api/loads?status=open");
+        const neg = await api("/api/loads?status=negotiating");
+        const all = loads.concat(neg.loads || []);
+        $("loads").innerHTML = all.length ? "" : '<p class="muted">No open loads yet.</p>';
+        for (const l of all) renderLoad(l);
+      } catch (e) { out("Error: " + e.message); }
+    }
+
+    function renderLoad(l) {
+      const div = document.createElement("div");
+      div.className = "load";
+      div.innerHTML = `<h3>${l.title || l.ref}</h3>
+        <div><span class="pill">${l.status}</span><span class="pill">${l.load_type}</span>
+        <span class="pill">${l.weight_kg} kg</span>${(l.classifications||[]).map(c=>`<span class="pill">${c}</span>`).join("")}</div>
+        <p class="muted">ref ${l.ref} · ${l.currency}</p>`;
+      const bidPrice = document.createElement("input"); bidPrice.placeholder = "your bid price";
+      const bid = document.createElement("button"); bid.textContent = "Place bid";
+      bid.onclick = async () => {
+        try {
+          const offer = await api(`/api/loads/${l.ref}/offers`, jsonPost({
+            bidder_id: "transporter-1", bidder_role: "transporter",
+            price: parseFloat(bidPrice.value), negotiation_style: $("style") ? $("style").value : "consensus",
+          }));
+          out(offer); await offersFor(l.ref, div);
+        } catch (e) { out("Error: " + e.message); }
+      };
+      const est = document.createElement("button"); est.textContent = "Fair rate"; est.className = "ghost";
+      est.onclick = async () => { try { out(await api(`/api/loads/${l.ref}/estimate`, jsonPost({}))); } catch (e) { out("Error: " + e.message); } };
+      div.append(bidPrice, bid, est);
+      const offersDiv = document.createElement("div"); div.append(offersDiv);
+      offersFor(l.ref, div, offersDiv);
+      $("loads").append(div);
+    }
+
+    async function offersFor(ref, container, target) {
+      const host = target || container.querySelector(".offers") || (() => { const d = document.createElement("div"); d.className = "offers"; container.append(d); return d; })();
+      try {
+        const { offers } = await api(`/api/loads/${ref}/offers`);
+        host.innerHTML = offers.map((o) => `<p class="muted">bid #${o.id}: ${o.currency} ${o.price} — ${o.status} (${o.bidder_role})</p>`).join("");
+        for (const o of offers) {
+          if (["accepted", "rejected", "withdrawn"].includes(o.status)) continue;
+          const haggle = document.createElement("button"); haggle.className = "ghost"; haggle.textContent = `AI haggle #${o.id}`;
+          haggle.onclick = async () => {
+            try {
+              const styles = await api("/api/negotiation-styles");
+              out(await api(`/api/offers/${o.id}/haggle`, jsonPost({
+                as_role: "shipper", negotiation_style: o.negotiation_style || styles.default,
+                counterparty_name: "Transporter",
+              })));
+            } catch (e) { out("Error: " + e.message); }
+          };
+          const accept = document.createElement("button"); accept.textContent = `Accept #${o.id}`;
+          accept.onclick = async () => { try { out(await api(`/api/offers/${o.id}/accept`, jsonPost({}))); await loadList(); } catch (e) { out("Error: " + e.message); } };
+          host.append(haggle, accept);
+        }
+      } catch (e) { /* load may have no offers yet */ }
+    }
+
+    loadList();
+  </script>
+</body>
+</html>
