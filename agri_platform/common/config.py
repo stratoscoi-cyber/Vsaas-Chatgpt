@@ -78,6 +78,10 @@ class Settings:
     tracking_webhook_url: Optional[str] = None
     # Enforce vehicle/driver onboarding compliance before allowing offers
     compliance_enforced: bool = False
+    # Outbound notification channel provider webhooks (SMS / WhatsApp / push)
+    sms_webhook_url: Optional[str] = None
+    whatsapp_webhook_url: Optional[str] = None
+    push_webhook_url: Optional[str] = None
     # HTTP
     port: int = 5000
 
@@ -114,6 +118,9 @@ class Settings:
             haggle_ai_endpoint=os.getenv("HAGGLE_AI_ENDPOINT"),
             tracking_webhook_url=os.getenv("TRACKING_WEBHOOK_URL"),
             compliance_enforced=_bool("COMPLIANCE_ENFORCED", False),
+            sms_webhook_url=os.getenv("SMS_WEBHOOK_URL"),
+            whatsapp_webhook_url=os.getenv("WHATSAPP_WEBHOOK_URL"),
+            push_webhook_url=os.getenv("PUSH_WEBHOOK_URL"),
             port=_int("PORT", default_port),
         )
 

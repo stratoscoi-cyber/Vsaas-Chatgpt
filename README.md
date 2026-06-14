@@ -277,6 +277,24 @@ Loads carry a **mode** and an auto-derived **scope**:
 - **Optional cargo insurance** is selectable by the load owner at placement
   (`insurance_opted`, `insurance_level`, `insurance_value`).
 
+## prisaMove platform enhancements
+
+| Capability | Endpoints | Notes |
+|------------|-----------|-------|
+| **Reputation & scoring** | `POST /api/ratings`, `GET /api/carriers/{id}/reputation` | avg rating + on-time / cancellation performance → composite trust score |
+| **Telematics ingestion** | `POST /api/telematics/heartbeat`, `/event`, `GET /api/vehicles/{id}/telematics` | device pings drive the live track; `tamper` auto-suspends the vehicle; stale heartbeat → offline |
+| **Escrow + ePOD + settlement** | award opens escrow; `POST /api/shipments/{id}/epod`, `POST /api/escrows/{id}/release` | release requires a valid ePOD and settles **net of statutory tax/withholding** (tax engine); gateway is a pluggable adapter (`manual` default) |
+| **Insurance marketplace** | `POST /api/admin/insurance-rates`, `/api/insurance/quote|bind|claims` | premiums from operator/insurer-configured rates; claims workflow tied to a shipment |
+| **Dynamic pricing & demand** | `GET /api/regions/{c}/surge`, `/api/lanes/{o}/{d}/benchmark`, `/api/loads/{ref}/backhaul`; carbon in estimates | surge from open-load/vehicle balance; backhaul = return-trip matching; CO₂e from standard emission factors |
+| **Fleet & HOS** | `GET /api/vehicles/{id}/service-status`, `POST /api/drivers/{id}/duty`, `GET /api/drivers/{id}/hours` | inspection service-due; hours-of-service from duty logs |
+| **Trust & safety** | `GET /api/ops/review-queue`, `/api/trust/clusters` | review queue (risk-ranked); self-inspection rings & shared-document clusters |
+| **Resilience** | `Idempotency-Key` header; `X-Tenant-ID`; admin audit log; Redis-backed event bus (`REDIS_URL`) | exactly-once mutations; auditable admin actions; SSE across workers |
+| **Channels & PWA** | `POST /api/notifications/send` (sms/whatsapp/push); `frontend/` PWA (manifest + service worker) | provider webhooks (console fallback); offline-capable app shell |
+
+These build on the same principles: deterministic logic over real data, with external
+providers (payment gateway, insurers, SMS/WhatsApp) behind adapters that do nothing
+until configured — no fabricated transactions, rates or deliveries.
+
 ## prisaMove live shipment tracking
 
 Awarding an offer (`POST /api/offers/{id}/accept`) opens a trackable **shipment**.
@@ -404,12 +422,13 @@ routing / inference collaborators — no network required.
 agri_platform/
   common/        config, logging, errors, security, ratelimit, cache, pagination,
                  geo, weather, db, regions, i18n, localization, currency, tax,
-                 holidays, holiday_provider, eventbus
+                 holidays, holiday_provider, eventbus, channels
   wfaas/         models, service, notifications, monitoring, ai, app, wsgi, Dockerfile
   traas/         models, routing, service, app, wsgi, Dockerfile
   marketplace/   models, pricing, negotiation, service, tax_service, calendar_service,
-                 tracking, routing_client, compliance, compliance_service,
-                 loads_planning, app, wsgi, Dockerfile   (LGaaS / prisaMove)
+                 tracking, routing_client, compliance, compliance_service, loads_planning,
+                 reputation, telematics, payments, insurance, demand, fleet, trust,
+                 resilience, app, wsgi, Dockerfile   (LGaaS / prisaMove)
 migrations/      Alembic envs for wfaas / traas / lgaas
 frontend/        index.html (GIS dashboard) + marketplace.html (prisaMove)
 tests/           pytest suite

@@ -1,0 +1,18 @@
+{
+  "name": "prisaMove — Agri-Travel-Logistics",
+  "short_name": "prisaMove",
+  "description": "Hazard-aware agricultural logistics: post loads, bid, track shipments.",
+  "start_url": "marketplace.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0c1117",
+  "theme_color": "#2f7d4f",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='28' fill='%232f7d4f'/%3E%3Ctext x='96' y='126' font-size='110' text-anchor='middle' fill='white' font-family='sans-serif'%3EpM%3C/text%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

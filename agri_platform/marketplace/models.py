@@ -104,6 +104,10 @@ class Vehicle(Base):
     tracker_serviceable = Column(Boolean, default=False)
     camera_serial = Column(String(60))
     inspection_valid_until = Column(String(10))  # ISO date
+    # Telematics (from the mandated IoT tracker).
+    telematics_status = Column(String(12))   # online|offline|suspected_tamper
+    last_heartbeat_at = Column(DateTime)
+    odometer_km = Column(Float)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self):
@@ -126,6 +130,9 @@ class Vehicle(Base):
             "tracker_serviceable": self.tracker_serviceable,
             "camera_serial": self.camera_serial,
             "inspection_valid_until": self.inspection_valid_until,
+            "telematics_status": self.telematics_status,
+            "last_heartbeat_at": self.last_heartbeat_at.isoformat() if self.last_heartbeat_at else None,
+            "odometer_km": self.odometer_km,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -636,3 +643,241 @@ class Consolidation(Base):
                 "destination_region": self.destination_region, "load_refs": self.load_refs or [],
                 "total_weight_kg": self.total_weight_kg, "status": self.status,
                 "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+# --- reputation ----------------------------------------------------------------
+
+class Rating(Base):
+    __tablename__ = "ratings"
+
+    id = Column(Integer, primary_key=True)
+    subject_type = Column(String(16), index=True)  # carrier|driver|shipper
+    subject_id = Column(String(50), index=True)
+    rater_id = Column(String(50))
+    shipment_id = Column(String(50))
+    score = Column(Float)  # 1..5
+    comment = Column(String(500))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"id": self.id, "subject_type": self.subject_type, "subject_id": self.subject_id,
+                "rater_id": self.rater_id, "shipment_id": self.shipment_id, "score": self.score,
+                "comment": self.comment, "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+# --- telematics ----------------------------------------------------------------
+
+class TelematicsPing(Base):
+    __tablename__ = "telematics_pings"
+
+    id = Column(Integer, primary_key=True)
+    vehicle_id = Column(String(50), index=True)
+    shipment_id = Column(String(50))
+    lat = Column(Float)
+    lon = Column(Float)
+    speed_kmh = Column(Float)
+    heading = Column(Float)
+    odometer_km = Column(Float)
+    fuel_level = Column(Float)
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"vehicle_id": self.vehicle_id, "shipment_id": self.shipment_id, "lat": self.lat,
+                "lon": self.lon, "speed_kmh": self.speed_kmh, "heading": self.heading,
+                "odometer_km": self.odometer_km, "fuel_level": self.fuel_level,
+                "recorded_at": self.recorded_at.isoformat() if self.recorded_at else None}
+
+
+class TelematicsEvent(Base):
+    __tablename__ = "telematics_events"
+
+    id = Column(Integer, primary_key=True)
+    vehicle_id = Column(String(50), index=True)
+    event_type = Column(String(24))  # harsh_braking|speeding|geofence|tamper|offline|online|health
+    severity = Column(String(12))
+    data = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"id": self.id, "vehicle_id": self.vehicle_id, "event_type": self.event_type,
+                "severity": self.severity, "data": self.data,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+class DutyLog(Base):
+    """Driver hours-of-service duty status segments."""
+
+    __tablename__ = "duty_logs"
+
+    id = Column(Integer, primary_key=True)
+    driver_id = Column(String(50), index=True)
+    status = Column(String(12))  # driving|on_duty|rest|off
+    started_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime)
+
+    def to_dict(self):
+        return {"id": self.id, "driver_id": self.driver_id, "status": self.status,
+                "started_at": self.started_at.isoformat() if self.started_at else None,
+                "ended_at": self.ended_at.isoformat() if self.ended_at else None}
+
+
+# --- payments / escrow / ePOD --------------------------------------------------
+
+class Escrow(Base):
+    __tablename__ = "escrows"
+
+    id = Column(Integer, primary_key=True)
+    escrow_id = Column(String(50), unique=True, nullable=False, index=True)
+    shipment_id = Column(String(50), index=True)
+    load_ref = Column(String(50))
+    payer_id = Column(String(50))
+    payee_id = Column(String(50))
+    amount = Column(Float)
+    currency = Column(String(8), default="USD")
+    status = Column(String(16), default="pending")  # pending|funded|released|refunded|disputed
+    provider = Column(String(40))
+    provider_ref = Column(String(120))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"escrow_id": self.escrow_id, "shipment_id": self.shipment_id, "load_ref": self.load_ref,
+                "payer_id": self.payer_id, "payee_id": self.payee_id, "amount": self.amount,
+                "currency": self.currency, "status": self.status, "provider": self.provider,
+                "provider_ref": self.provider_ref,
+                "created_at": self.created_at.isoformat() if self.created_at else None,
+                "updated_at": self.updated_at.isoformat() if self.updated_at else None}
+
+
+class ProofOfDelivery(Base):
+    __tablename__ = "proofs_of_delivery"
+
+    id = Column(Integer, primary_key=True)
+    shipment_id = Column(String(50), index=True)
+    recipient_name = Column(String(120))
+    signature_ref = Column(String(200))
+    photo_refs = Column(JSON, default=list)
+    notes = Column(String(500))
+    delivered_at = Column(String(40))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"id": self.id, "shipment_id": self.shipment_id, "recipient_name": self.recipient_name,
+                "signature_ref": self.signature_ref, "photo_refs": self.photo_refs or [],
+                "notes": self.notes, "delivered_at": self.delivered_at,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+class Settlement(Base):
+    __tablename__ = "settlements"
+
+    id = Column(Integer, primary_key=True)
+    escrow_id = Column(String(50), index=True)
+    gross = Column(Float)
+    tax_total = Column(Float)
+    withheld = Column(Float)
+    net_to_payee = Column(Float)
+    currency = Column(String(8))
+    breakdown = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"id": self.id, "escrow_id": self.escrow_id, "gross": self.gross,
+                "tax_total": self.tax_total, "withheld": self.withheld,
+                "net_to_payee": self.net_to_payee, "currency": self.currency, "breakdown": self.breakdown,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+# --- insurance -----------------------------------------------------------------
+
+class InsuranceRate(Base):
+    """Operator/insurer-configured cargo insurance rate (no built-in rates)."""
+
+    __tablename__ = "insurance_rates"
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String(50), unique=True, nullable=False, index=True)
+    insurer_code = Column(String(50))
+    region_code = Column(String(8), index=True)
+    level = Column(String(16))  # basic|premium
+    rate_percent = Column(Float)
+    min_premium = Column(Float, default=0.0)
+    active = Column(Boolean, default=True)
+
+    def to_dict(self):
+        return {"code": self.code, "insurer_code": self.insurer_code, "region_code": self.region_code,
+                "level": self.level, "rate_percent": self.rate_percent, "min_premium": self.min_premium,
+                "active": self.active}
+
+
+class InsurancePolicy(Base):
+    __tablename__ = "insurance_policies"
+
+    id = Column(Integer, primary_key=True)
+    policy_id = Column(String(50), unique=True, nullable=False, index=True)
+    load_ref = Column(String(50), index=True)
+    shipment_id = Column(String(50))
+    insurer_code = Column(String(50))
+    level = Column(String(16))
+    sum_insured = Column(Float)
+    premium = Column(Float)
+    currency = Column(String(8))
+    status = Column(String(16), default="quoted")  # quoted|bound|cancelled|claimed
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"policy_id": self.policy_id, "load_ref": self.load_ref, "shipment_id": self.shipment_id,
+                "insurer_code": self.insurer_code, "level": self.level, "sum_insured": self.sum_insured,
+                "premium": self.premium, "currency": self.currency, "status": self.status,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+class InsuranceClaim(Base):
+    __tablename__ = "insurance_claims"
+
+    id = Column(Integer, primary_key=True)
+    claim_id = Column(String(50), unique=True, nullable=False, index=True)
+    policy_id = Column(String(50), index=True)
+    shipment_id = Column(String(50))
+    reason = Column(String(200))
+    amount = Column(Float)
+    status = Column(String(16), default="open")  # open|review|approved|rejected|paid
+    evidence = Column(JSON, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"claim_id": self.claim_id, "policy_id": self.policy_id, "shipment_id": self.shipment_id,
+                "reason": self.reason, "amount": self.amount, "status": self.status,
+                "evidence": self.evidence or [],
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+# --- resilience: audit & idempotency ------------------------------------------
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True)
+    actor = Column(String(80))
+    tenant_id = Column(String(50))
+    method = Column(String(10))
+    path = Column(String(300))
+    status_code = Column(Integer)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"id": self.id, "actor": self.actor, "tenant_id": self.tenant_id, "method": self.method,
+                "path": self.path, "status_code": self.status_code,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(120), unique=True, nullable=False, index=True)
+    method = Column(String(10))
+    path = Column(String(300))
+    status_code = Column(Integer)
+    response_json = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)

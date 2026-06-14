@@ -50,4 +50,79 @@ class EventBus:
             return len(self._subscribers.get(channel, ()))
 
 
-__all__ = ["EventBus", "Empty"]
+class RedisEventBus:
+    """Cross-process event bus backed by Redis pub/sub (same interface as EventBus).
+
+    ``publish`` goes to Redis; each ``subscribe`` starts a listener thread that
+    feeds a local queue, so SSE works across multiple workers/replicas.
+    """
+
+    def __init__(self, redis_url: str, prefix: str = "evbus:", max_queue: int = 100):
+        import redis  # optional dependency
+
+        self._redis = redis.Redis.from_url(redis_url, decode_responses=True)
+        self._redis.ping()
+        self._prefix = prefix
+        self._max_queue = max_queue
+        self._threads: Dict[Queue, threading.Thread] = {}
+        self._stops: Dict[Queue, threading.Event] = {}
+
+    def subscribe(self, channel: str) -> Queue:
+        import json as _json
+
+        q: Queue = Queue(maxsize=self._max_queue)
+        stop = threading.Event()
+        pubsub = self._redis.pubsub()
+        pubsub.subscribe(self._prefix + channel)
+
+        def _listen():
+            try:
+                for msg in pubsub.listen():
+                    if stop.is_set():
+                        break
+                    if msg.get("type") != "message":
+                        continue
+                    try:
+                        q.put_nowait(_json.loads(msg["data"]))
+                    except Full:
+                        pass
+            finally:
+                pubsub.close()
+
+        t = threading.Thread(target=_listen, daemon=True)
+        t.start()
+        self._threads[q] = t
+        self._stops[q] = stop
+        return q
+
+    def unsubscribe(self, channel: str, q: Queue) -> None:
+        stop = self._stops.pop(q, None)
+        if stop:
+            stop.set()
+        self._threads.pop(q, None)
+
+    def publish(self, channel: str, data) -> int:
+        import json as _json
+
+        return int(self._redis.publish(self._prefix + channel, _json.dumps(data)))
+
+    def subscriber_count(self, channel: str) -> int:  # best-effort
+        try:
+            return int(self._redis.pubsub_numsub(self._prefix + channel)[0][1])
+        except Exception:  # pragma: no cover
+            return 0
+
+
+def make_event_bus(redis_url: Optional[str] = None) -> "EventBus":
+    """Redis-backed bus when a URL is given and reachable, else in-process."""
+    if redis_url:
+        try:
+            return RedisEventBus(redis_url)
+        except Exception:  # pragma: no cover - depends on infra
+            pass
+    return EventBus()
+
+
+from typing import Optional  # noqa: E402  (kept local to avoid reordering above)
+
+__all__ = ["EventBus", "RedisEventBus", "make_event_bus", "Empty"]

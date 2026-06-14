@@ -29,18 +29,20 @@ from ..common import regions
 from ..common import tax as tax_engine
 import hashlib
 
-from ..common.eventbus import EventBus
+from ..common.channels import build_channels
+from ..common.eventbus import make_event_bus
 from ..common.holiday_provider import make_holiday_provider
 from . import (
-    calendar_service, compliance_service, loads_planning, negotiation, service,
-    tax_service, tracking,
+    calendar_service, compliance_service, demand, fleet, insurance, loads_planning,
+    negotiation, payments, reputation, resilience, service, tax_service, telematics,
+    tracking, trust,
 )
 from .routing_client import make_traas_client
 from .models import (
     ApprovedAgency, Base, ComplianceDecision, ComplianceDocument, Consolidation,
-    DelayReason, Driver, Holiday, Inspection, Load, NegotiationMessage, Offer,
-    RegionComplianceRule, ServiceCenter, Shipment, ShipmentEvent, TaxRule,
-    TrackPoint, Vehicle,
+    DelayReason, Driver, Escrow, Holiday, Inspection, InsuranceClaim, InsurancePolicy,
+    InsuranceRate, Load, NegotiationMessage, Offer, RegionComplianceRule, ServiceCenter,
+    Shipment, ShipmentEvent, TaxRule, TrackPoint, Vehicle,
 )
 
 SERVICE_NAME = "lgaas"
@@ -74,11 +76,17 @@ def create_app(
     app.config["TRAAS_CLIENT"] = traas_client or make_traas_client(settings.traas_url)
     # Event bus backs server-sent events; every shipment event also reaches the
     # configured webhook/console notifier via a composite.
-    bus = EventBus()
+    bus = make_event_bus(settings.redis_url)
     app.config["EVENT_BUS"] = bus
     base_notifier = tracking_notifier or tracking.make_tracking_notifier(settings)
     app.config["TRACKING_NOTIFIER"] = tracking.CompositeNotifier([tracking.BusTrackingNotifier(bus), base_notifier])
     app.config["COMPLIANCE_ENFORCED"] = settings.compliance_enforced
+    app.config["PAYMENT_GATEWAY"] = payments.ManualGateway()
+    app.config["CHANNELS"] = build_channels({
+        "sms": getattr(settings, "sms_webhook_url", None),
+        "whatsapp": getattr(settings, "whatsapp_webhook_url", None),
+        "push": getattr(settings, "push_webhook_url", None),
+    })
 
     install_request_logging(app, SERVICE_NAME)
     install_auth(app, settings.api_keys, settings.auth_enabled)
@@ -87,6 +95,7 @@ def create_app(
     install_localization(app, settings.default_language)
     register_localization(app)
     register_error_handlers(app)
+    resilience.install_resilience(app)
     app.config["DEFAULT_REGION_CODE"] = settings.default_region
 
     @app.teardown_appcontext
@@ -247,7 +256,10 @@ def create_app(
         )
         est_dict = est.to_dict()
         est_dict["recommended_formatted"] = _money(est.recommended, load.currency or "USD")
-        return jsonify(load_ref=ref, estimate=est_dict, tax=tax)
+        region_code = load.origin_region or app.config["DEFAULT_REGION_CODE"]
+        demand_info = demand.surge_factor(session, region_code)
+        carbon = demand.carbon_estimate(est.distance_km, load.weight_kg, data.get("vehicle_type"))
+        return jsonify(load_ref=ref, estimate=est_dict, tax=tax, demand=demand_info, carbon=carbon)
 
     @app.post("/api/estimate")
     def estimate_adhoc():
@@ -397,6 +409,7 @@ def create_app(
             raise ApiError(str(exc), status_code=409, code="conflict")
         # Awarding a load opens a live, trackable shipment.
         shipment = None
+        escrow = None
         if load.origin and load.destination:
             shipment = tracking.create_shipment(
                 session, load, offer,
@@ -405,8 +418,14 @@ def create_app(
                 avg_speed_kmh=data.get("avg_speed_kmh"),
                 notifier=app.config["TRACKING_NOTIFIER"],
             )
+            escrow = payments.open_escrow(
+                session, shipment_id=shipment.shipment_id, load_ref=load.ref,
+                payer_id=load.shipper_id, payee_id=offer.bidder_id, amount=offer.price,
+                currency=offer.currency or load.currency or "USD",
+                gateway=app.config["PAYMENT_GATEWAY"])
         return jsonify(offer=offer.to_dict(), load=load.to_dict(),
-                       shipment=shipment.to_dict() if shipment else None)
+                       shipment=shipment.to_dict() if shipment else None,
+                       escrow=escrow.to_dict() if escrow else None)
 
     @app.post("/api/offers/<int:offer_id>/reject")
     def reject(offer_id):
@@ -1006,6 +1025,230 @@ def create_app(
         page, size = page_params()
         items, meta = paginate(q, page, size)
         return jsonify(consolidations=[c.to_dict() for c in items], pagination=meta)
+
+    # --- reputation & ratings --------------------------------------------------
+    @app.post("/api/ratings")
+    def add_rating():
+        data = get_json()
+        require(data, "subject_type", "subject_id", "score")
+        try:
+            r = reputation.add_rating(db(), subject_type=data["subject_type"], subject_id=data["subject_id"],
+                                      score=data["score"], rater_id=data.get("rater_id"),
+                                      shipment_id=data.get("shipment_id"), comment=data.get("comment"))
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(r.to_dict()), 201
+
+    @app.get("/api/carriers/<carrier_id>/reputation")
+    def carrier_reputation(carrier_id):
+        return jsonify(reputation.reputation(db(), "carrier", carrier_id))
+
+    @app.get("/api/<subject_type>/<subject_id>/reputation")
+    def subject_reputation(subject_type, subject_id):
+        if subject_type not in ("carrier", "driver", "shipper"):
+            raise ApiError("invalid subject_type", status_code=422, code="validation_error")
+        return jsonify(reputation.reputation(db(), subject_type, subject_id))
+
+    # --- telematics ------------------------------------------------------------
+    @app.post("/api/telematics/heartbeat")
+    def telematics_heartbeat():
+        data = get_json()
+        require(data, "vehicle_id")
+        try:
+            v = telematics.heartbeat(
+                db(), data["vehicle_id"], lat=data.get("lat"), lon=data.get("lon"),
+                speed_kmh=data.get("speed_kmh"), heading=data.get("heading"),
+                odometer_km=data.get("odometer_km"), fuel_level=data.get("fuel_level"),
+                shipment_id=data.get("shipment_id"), notifier=app.config["TRACKING_NOTIFIER"])
+        except LookupError as exc:
+            raise ApiError(str(exc), status_code=404, code="not_found")
+        return jsonify(v)
+
+    @app.post("/api/telematics/event")
+    def telematics_event():
+        data = get_json()
+        require(data, "vehicle_id", "event_type")
+        try:
+            res = telematics.record_event(db(), data["vehicle_id"], data["event_type"],
+                                          severity=data.get("severity", "info"), data=data.get("data"))
+        except LookupError as exc:
+            raise ApiError(str(exc), status_code=404, code="not_found")
+        return jsonify(res), 201
+
+    @app.get("/api/vehicles/<vid>/telematics")
+    def vehicle_telematics(vid):
+        try:
+            return jsonify(telematics.status(db(), vid))
+        except LookupError as exc:
+            raise ApiError(str(exc), status_code=404, code="not_found")
+
+    # --- payments: escrow & ePOD ----------------------------------------------
+    @app.get("/api/escrows/<escrow_id>")
+    def get_escrow(escrow_id):
+        e = db().query(Escrow).filter_by(escrow_id=escrow_id).first()
+        if e is None:
+            raise ApiError("escrow not found", status_code=404, code="not_found")
+        return jsonify(e.to_dict())
+
+    @app.get("/api/shipments/<sid>/escrow")
+    def shipment_escrow(sid):
+        e = db().query(Escrow).filter_by(shipment_id=sid).order_by(Escrow.id.desc()).first()
+        if e is None:
+            raise ApiError("no escrow for shipment", status_code=404, code="not_found")
+        return jsonify(e.to_dict())
+
+    @app.post("/api/shipments/<sid>/epod")
+    def post_epod(sid):
+        data = get_json()
+        session = db()
+        if session.query(Shipment).filter_by(shipment_id=sid).first() is None:
+            raise ApiError("shipment not found", status_code=404, code="not_found")
+        pod = payments.record_epod(session, sid, recipient_name=data.get("recipient_name"),
+                                   signature_ref=data.get("signature_ref"),
+                                   photo_refs=data.get("photo_refs", []), notes=data.get("notes"),
+                                   delivered_at=data.get("delivered_at"))
+        return jsonify(pod.to_dict()), 201
+
+    @app.post("/api/escrows/<escrow_id>/release")
+    def release_escrow(escrow_id):
+        session = db()
+        e = session.query(Escrow).filter_by(escrow_id=escrow_id).first()
+        if e is None:
+            raise ApiError("escrow not found", status_code=404, code="not_found")
+        load = session.query(Load).filter_by(ref=e.load_ref).first()
+        region_code = (load.origin_region if load else None) or app.config["DEFAULT_REGION_CODE"]
+        try:
+            settlement = payments.release_escrow(session, e, region_code=region_code,
+                                                 gateway=app.config["PAYMENT_GATEWAY"])
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=409, code="conflict")
+        return jsonify(escrow=e.to_dict(), settlement=settlement.to_dict())
+
+    # --- insurance marketplace -------------------------------------------------
+    @app.post("/api/admin/insurance-rates")
+    def add_insurance_rate():
+        data = get_json()
+        require(data, "code", "insurer_code", "level", "rate_percent")
+        session = db()
+        if session.query(InsuranceRate).filter_by(code=data["code"]).first():
+            raise ApiError("rate code already exists", status_code=409, code="conflict")
+        rate = InsuranceRate(code=data["code"], insurer_code=data["insurer_code"],
+                             region_code=data.get("region_code", "*"), level=data["level"],
+                             rate_percent=float(data["rate_percent"]),
+                             min_premium=float(data.get("min_premium", 0)), active=True)
+        session.add(rate)
+        session.commit()
+        return jsonify(rate.to_dict()), 201
+
+    @app.post("/api/insurance/quote")
+    def insurance_quote():
+        data = get_json()
+        require(data, "sum_insured")
+        region = data.get("region_code")
+        if not region and data.get("origin"):
+            r = regions.region_for_coords(data["origin"])
+            region = r.code if r else app.config["DEFAULT_REGION_CODE"]
+        quotes = insurance.quote(db(), sum_insured=float(data["sum_insured"]), region_code=region,
+                                 level=data.get("level"), currency=data.get("currency", "USD"),
+                                 locale=current_lang())
+        return jsonify(quotes=quotes)
+
+    @app.post("/api/insurance/bind")
+    def insurance_bind():
+        data = get_json()
+        require(data, "load_ref", "insurer_code", "level", "sum_insured", "premium", "currency")
+        policy = insurance.bind(db(), load_ref=data["load_ref"], insurer_code=data["insurer_code"],
+                                level=data["level"], sum_insured=float(data["sum_insured"]),
+                                premium=float(data["premium"]), currency=data["currency"],
+                                shipment_id=data.get("shipment_id"))
+        return jsonify(policy.to_dict()), 201
+
+    @app.post("/api/insurance/claims")
+    def insurance_claim():
+        data = get_json()
+        require(data, "policy_id", "reason", "amount")
+        try:
+            claim = insurance.open_claim(db(), policy_id=data["policy_id"], reason=data["reason"],
+                                         amount=float(data["amount"]), shipment_id=data.get("shipment_id"),
+                                         evidence=data.get("evidence", []))
+        except LookupError as exc:
+            raise ApiError(str(exc), status_code=404, code="not_found")
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(claim.to_dict()), 201
+
+    @app.post("/api/insurance/claims/<claim_id>/status")
+    def insurance_claim_status(claim_id):
+        data = get_json()
+        require(data, "status")
+        try:
+            claim = insurance.update_claim(db(), claim_id, data["status"])
+        except LookupError as exc:
+            raise ApiError(str(exc), status_code=404, code="not_found")
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(claim.to_dict())
+
+    # --- demand / dynamic pricing ----------------------------------------------
+    @app.get("/api/lanes/<origin>/<destination>/benchmark")
+    def lane_benchmark(origin, destination):
+        return jsonify(origin_region=origin, destination_region=destination,
+                       benchmark=demand.lane_benchmark(db(), origin, destination))
+
+    @app.get("/api/regions/<code>/surge")
+    def region_surge(code):
+        return jsonify(demand.surge_factor(db(), code))
+
+    @app.get("/api/loads/<ref>/backhaul")
+    def load_backhaul(ref):
+        session = db()
+        load = _load_or_404(session, ref)
+        radius = float(request.args.get("radius_km", 75))
+        return jsonify(load_ref=ref, candidates=demand.backhaul_candidates(session, load, radius_km=radius))
+
+    # --- fleet & driver capacity ----------------------------------------------
+    @app.get("/api/vehicles/<vid>/service-status")
+    def vehicle_service_status(vid):
+        v = db().query(Vehicle).filter_by(vehicle_id=vid).first()
+        if v is None:
+            raise ApiError("vehicle not found", status_code=404, code="not_found")
+        return jsonify(fleet.service_status(db(), v))
+
+    @app.post("/api/drivers/<did>/duty")
+    def driver_duty(did):
+        data = get_json()
+        require(data, "status")
+        try:
+            seg = fleet.log_duty(db(), did, data["status"])
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(seg.to_dict()), 201
+
+    @app.get("/api/drivers/<did>/hours")
+    def driver_hours(did):
+        window = int(request.args.get("window_hours", 24))
+        return jsonify(fleet.driving_hours(db(), did, window_hours=window))
+
+    # --- trust & safety --------------------------------------------------------
+    @app.get("/api/ops/review-queue")
+    def ops_review_queue():
+        return jsonify(queue=trust.review_queue(db()))
+
+    @app.get("/api/trust/clusters")
+    def trust_clusters():
+        return jsonify(clusters=trust.collusion_clusters(db()))
+
+    # --- notifications channels (SMS/WhatsApp/push) ----------------------------
+    @app.post("/api/notifications/send")
+    def send_notification():
+        data = get_json()
+        require(data, "channel", "to", "message")
+        channel = app.config["CHANNELS"].get(data["channel"])
+        if channel is None:
+            raise ApiError("unknown channel", status_code=422, code="validation_error",
+                           details={"channels": list(app.config["CHANNELS"].keys())})
+        ok = channel.send(data["to"], data["message"], data.get("meta"))
+        return jsonify(channel=data["channel"], delivered=ok)
 
     return app
 
