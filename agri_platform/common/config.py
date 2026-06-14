@@ -47,6 +47,9 @@ class Settings:
     # Upstreams
     open_meteo_url: str = "https://api.open-meteo.com/v1/forecast"
     valhalla_url: Optional[str] = None
+    # Localization (Africa-centric defaults)
+    default_language: str = "en"
+    default_region: str = "NG"
     # Observability
     log_level: str = "INFO"
     log_json: bool = True
@@ -81,6 +84,8 @@ class Settings:
             cache_ttl_seconds=_int("CACHE_TTL_SECONDS", 300),
             open_meteo_url=os.getenv("OPEN_METEO_URL", "https://api.open-meteo.com/v1/forecast"),
             valhalla_url=os.getenv("VALHALLA_URL"),
+            default_language=os.getenv("DEFAULT_LANGUAGE", "en"),
+            default_region=os.getenv("DEFAULT_REGION", "NG"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_json=_bool("LOG_JSON", True),
             notifications_enabled=_bool("NOTIFICATIONS_ENABLED", False),

@@ -72,6 +72,8 @@ services:
       AUTH_ENABLED: "${AUTH_ENABLED:-false}"
       API_KEYS: "${API_KEYS:-}"
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-0}"
+      DEFAULT_LANGUAGE: "${DEFAULT_LANGUAGE:-en}"
+      DEFAULT_REGION: "${DEFAULT_REGION:-NG}"
       MONITOR_ENABLED: "${MONITOR_ENABLED:-false}"
     ports:
       - "5001:5001"
@@ -87,6 +89,8 @@ services:
       AUTH_ENABLED: "${AUTH_ENABLED:-false}"
       API_KEYS: "${API_KEYS:-}"
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-0}"
+      DEFAULT_LANGUAGE: "${DEFAULT_LANGUAGE:-en}"
+      DEFAULT_REGION: "${DEFAULT_REGION:-NG}"
     ports:
       - "5002:5002"
 
@@ -101,6 +105,8 @@ services:
       AUTH_ENABLED: "${AUTH_ENABLED:-false}"
       API_KEYS: "${API_KEYS:-}"
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-0}"
+      DEFAULT_LANGUAGE: "${DEFAULT_LANGUAGE:-en}"
+      DEFAULT_REGION: "${DEFAULT_REGION:-NG}"
       HAGGLE_AI_ENDPOINT: "${HAGGLE_AI_ENDPOINT:-}"
     ports:
       - "5003:5003"

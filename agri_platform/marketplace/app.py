@@ -17,10 +17,12 @@ from sqlalchemy import text
 from ..common import db as db_helpers
 from ..common.config import Settings
 from ..common.errors import ApiError, as_float, get_json, register_error_handlers, require
+from ..common.localization import current_lang, install_localization, register_localization
 from ..common.logging import configure_logging, install_request_logging
 from ..common.pagination import page_params, paginate
 from ..common.ratelimit import RateLimiter, install_rate_limiting
 from ..common.security import install_auth
+from ..common import regions
 from . import negotiation, service
 from .models import Base, Load, NegotiationMessage, Offer, Vehicle
 
@@ -52,7 +54,10 @@ def create_app(
     install_request_logging(app, SERVICE_NAME)
     install_auth(app, settings.api_keys, settings.auth_enabled)
     install_rate_limiting(app, RateLimiter(settings.rate_limit_per_minute))
+    install_localization(app, settings.default_language)
+    register_localization(app)
     register_error_handlers(app)
+    app.config["DEFAULT_REGION_CODE"] = settings.default_region
 
     @app.teardown_appcontext
     def _cleanup(exc=None):  # noqa: ANN001
@@ -95,10 +100,21 @@ def create_app(
         return jsonify(status="ready", service=SERVICE_NAME)
 
     # --- loads -----------------------------------------------------------------
+    def _auto_currency(data) -> str:
+        """Explicit currency wins; otherwise infer from the origin's region."""
+        if data.get("currency"):
+            return data["currency"]
+        region = regions.region_for_coords(data.get("origin"))
+        if region is None:
+            region = regions.lookup(app.config["DEFAULT_REGION_CODE"]) or regions.DEFAULT_REGION
+        return region.currency
+
     @app.post("/api/loads")
     def create_load():
         data = get_json()
         require(data, "shipper_id", "weight_kg")
+        currency = _auto_currency(data)
+        region = regions.region_for_coords(data.get("origin"))
         load = Load(
             ref=data.get("ref") or _new_ref("load"),
             shipper_id=data["shipper_id"],
@@ -113,7 +129,7 @@ def create_app(
             pickup_window=data.get("pickup_window"),
             delivery_deadline=data.get("delivery_deadline"),
             budget=data.get("budget"),
-            currency=data.get("currency", "USD"),
+            currency=currency,
             distance_km=data.get("distance_km"),
             notes=data.get("notes"),
             status="open",
@@ -123,7 +139,10 @@ def create_app(
             raise ApiError("load ref already exists", status_code=409, code="conflict")
         session.add(load)
         session.commit()
-        return jsonify(load.to_dict()), 201
+        body = load.to_dict()
+        if region is not None:
+            body["region"] = region.to_dict()
+        return jsonify(body), 201
 
     @app.get("/api/loads")
     def list_loads():
@@ -171,6 +190,8 @@ def create_app(
 
         data = get_json()
         require(data, "weight_kg")
+        currency = _auto_currency(data)
+        region = regions.region_for_coords(data.get("origin"))
         est = pricing.estimate_rate(
             weight_kg=as_float(data, "weight_kg"),
             dimensions_cm=data.get("dimensions_cm"),
@@ -181,9 +202,9 @@ def create_app(
             destination=data.get("destination"),
             distance_km=data.get("distance_km"),
             urgency_factor=float(data.get("urgency_factor", 1.0)),
-            currency=data.get("currency", "USD"),
+            currency=currency,
         )
-        return jsonify(estimate=est.to_dict())
+        return jsonify(estimate=est.to_dict(), region=region.to_dict() if region else None)
 
     # --- vehicles --------------------------------------------------------------
     @app.post("/api/vehicles")
@@ -300,6 +321,12 @@ def create_app(
         session = db()
         offer = _offer_or_404(session, offer_id)
         load = _load_or_404(session, offer.load_ref)
+        # Language: explicit > request locale (?lang / Accept-Language) > load region.
+        region = regions.region_for_coords(load.origin)
+        lang = data.get("lang") or current_lang()
+        if not data.get("lang") and region is not None:
+            from ..common import i18n
+            lang = i18n.resolve_language(region_language=region.primary_language, default=current_lang())
         try:
             result = service.haggle(
                 session, load, offer,
@@ -309,6 +336,7 @@ def create_app(
                 custom_profile=data.get("custom_profile"),
                 composer=app.config["COMPOSER"],
                 counterparty_name=data.get("counterparty_name"),
+                lang=lang,
                 record=bool(data.get("record", True)),
             )
         except ValueError as exc:

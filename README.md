@@ -160,6 +160,38 @@ and deterministic; set `HAGGLE_AI_ENDPOINT` to delegate phrasing to an LLM
 service (it falls back to the template composer on any error). No analysis or
 message is fabricated when an endpoint is absent.
 
+## Africa-centric regions & i18n
+
+The platform defaults to African markets and localizes **automatically** across
+all three services.
+
+- **Region registry** (`common/regions.py`) — ~20 African markets, each with
+  spoken languages (primary first), settlement currency, timezone and an
+  approximate bounding box. `region_for_point(lat, lon)` infers the market from
+  coordinates (falls back to a pan-African default).
+- **i18n** (`common/i18n.py`) — fallback-safe translation (`requested → base →
+  English`) across **English, French, Portuguese, Swahili, Arabic, Hausa**.
+  Partial catalogs never break or fabricate output — they fall back. New
+  languages/keys are pure data.
+- **Auto localization** —
+  - Language per request from `?lang=` or the `Accept-Language` header; responses
+    carry `Content-Language`.
+  - **LGaaS** infers a load's **currency** from its origin region (e.g. Senegal →
+    XOF, Kenya → KES, Nigeria → NGN) unless a currency is given, and the AI
+    haggling messages are emitted in the region's language (or an explicit
+    `lang`). Example: a Kenya load auto-produces Swahili counter-offers.
+- **Discovery endpoints** (on every service): `GET /api/i18n/languages`,
+  `GET /api/regions`, `GET /api/regions/lookup?lat=&lon=`.
+
+```bash
+curl "localhost:5003/api/regions/lookup?lat=-1.29&lon=36.82"   # -> Kenya, sw, KES
+curl -s localhost:5003/api/offers/1/haggle -H 'content-type: application/json' \
+  -d '{"as_role":"shipper","lang":"fr"}'                        # French counter-offer
+```
+
+> The negotiation-style profiles and language catalogs are configurable
+> conventions, not assumptions about individuals; extend or override them freely.
+
 ## Configuration
 
 | Env var | Default | Used by |
@@ -170,6 +202,7 @@ message is fabricated when an endpoint is absent.
 | `RATE_LIMIT_PER_MINUTE` | `0` (off) | all |
 | `VALHALLA_URL` | _unset → straight-line_ | traas |
 | `OPEN_METEO_URL` | Open-Meteo public API | wfaas |
+| `DEFAULT_LANGUAGE` / `DEFAULT_REGION` | `en` / `NG` | all (i18n fallback) |
 | `MONITOR_ENABLED` / `MONITOR_INTERVAL_MINUTES` | `false` / `30` | wfaas |
 | `NOTIFICATIONS_ENABLED` + `SMTP_*` | `false` | wfaas |
 | `DRONE_AI_ENDPOINT` | _unset_ | wfaas (drone imagery) |
@@ -189,7 +222,8 @@ routing / inference collaborators — no network required.
 
 ```
 agri_platform/
-  common/        config, logging, errors, security, ratelimit, cache, pagination, geo, weather, db
+  common/        config, logging, errors, security, ratelimit, cache, pagination,
+                 geo, weather, db, regions, i18n, localization
   wfaas/         models, service, notifications, monitoring, ai, app, wsgi, Dockerfile
   traas/         models, routing, service, app, wsgi, Dockerfile
   marketplace/   models, pricing, negotiation, service, app, wsgi, Dockerfile   (LGaaS / prisaMove)

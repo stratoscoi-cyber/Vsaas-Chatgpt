@@ -21,7 +21,9 @@ from ..common.cache import Cache, make_cache
 from ..common.config import Settings
 from ..common.errors import ApiError, as_float, get_json, register_error_handlers, require
 from ..common.geo import buffer_point_ring, calculate_gdd
+from ..common.localization import install_localization, register_localization
 from ..common.logging import configure_logging, install_request_logging
+from ..common import regions
 from ..common.pagination import page_params, paginate
 from ..common.ratelimit import RateLimiter, install_rate_limiting
 from ..common.security import install_auth
@@ -71,6 +73,8 @@ def create_app(
     install_request_logging(app, SERVICE_NAME)
     install_auth(app, settings.api_keys, settings.auth_enabled)
     install_rate_limiting(app, RateLimiter(settings.rate_limit_per_minute))
+    install_localization(app, settings.default_language)
+    register_localization(app)
     register_error_handlers(app)
 
     @app.teardown_appcontext
@@ -347,6 +351,8 @@ def create_app(
         notified = dispatch_alert(session, app.config["NOTIFIER"], alert)
         body = alert.to_dict()
         body["notified"] = notified
+        region = regions.region_for_point(lat, lon)
+        body["region"] = region.to_dict()
         return jsonify(body), 201
 
     @app.get("/api/alerts")

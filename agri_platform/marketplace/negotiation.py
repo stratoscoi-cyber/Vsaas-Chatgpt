@@ -179,53 +179,45 @@ class MessageComposer(Protocol):
 
 
 class TemplateComposer:
-    """Deterministic, offline composer that adapts tone to the profile."""
+    """Deterministic, offline composer that adapts tone to the profile and the
+    requested language (``context['lang']``), via the i18n catalog."""
 
     def compose(self, profile, role, move, currency, context=None) -> str:
+        from ..common import i18n
+
         context = context or {}
+        lang = context.get("lang", i18n.DEFAULT_LANGUAGE)
         name = context.get("counterparty_name")
+        warm = profile.relationship_emphasis >= 0.6
+        money = f"{currency} {move.counter_price:,.2f}" if move.counter_price is not None else currency
         lines: List[str] = []
 
-        greeting = profile.greeting
+        greeting = i18n.translate("greeting.warm" if warm else "greeting.default", lang)
         if name:
-            greeting = greeting.replace("{name}", name) if "{name}" in greeting \
-                else f"{greeting.rstrip(' ,.')}, {name}."
+            greeting = f"{greeting.rstrip(' ,،.')}, {name}."
         lines.append(greeting)
 
-        if profile.relationship_emphasis >= 0.6:
-            lines.append(
-                "Thank you for engaging with us — building a lasting, fair partnership "
-                "matters more to us than any single trip."
-            )
+        if warm:
+            lines.append(i18n.translate("relationship.line", lang))
 
-        load_desc = context.get("load_title")
-        if load_desc:
-            lines.append(f"Regarding the shipment “{load_desc}”:")
+        if context.get("load_title"):
+            lines.append(i18n.translate("load.line", lang, title=context["load_title"]))
 
-        price = move.counter_price
         if move.action == "accept":
-            body = f"Your terms work for us — we are glad to accept {currency} {price:,.2f}."
+            body = i18n.translate("accept.line", lang, price=money)
         else:
-            if profile.directness >= 0.7:
-                body = f"We can do {currency} {price:,.2f}."
-            elif profile.directness >= 0.45:
-                body = f"Could we meet around {currency} {price:,.2f}?"
-            else:
-                body = (
-                    f"If it is agreeable to you, perhaps we might consider a figure in "
-                    f"the region of {currency} {price:,.2f}."
-                )
+            tier = "offer.direct" if profile.directness >= 0.7 else (
+                "offer.soft" if profile.directness >= 0.45 else "offer.indirect")
+            body = i18n.translate(tier, lang, price=money)
             if profile.haggle_intensity >= 0.7:
-                body += " There is a little room to move if we can settle today."
+                body += " " + i18n.translate("room.line", lang)
         lines.append(body)
 
         if context.get("fair_rate") and profile.directness < 0.7:
-            lines.append(
-                f"For reference, a fair market rate for this load is about "
-                f"{currency} {float(context['fair_rate']):,.2f}."
-            )
+            fair = f"{currency} {float(context['fair_rate']):,.2f}"
+            lines.append(i18n.translate("fair.reference", lang, price=fair))
 
-        lines.append(profile.closing)
+        lines.append(i18n.translate("closing.warm" if warm else "closing.default", lang))
         return "\n".join(lines)
 
 

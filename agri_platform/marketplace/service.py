@@ -159,6 +159,7 @@ def haggle(
     custom_profile: Optional[Dict] = None,
     composer: Optional[negotiation.MessageComposer] = None,
     counterparty_name: Optional[str] = None,
+    lang: str = "en",
     record: bool = True,
 ) -> Dict:
     """Produce an AI haggling suggestion (action + counter price + message).
@@ -190,6 +191,7 @@ def haggle(
         "counterparty_name": counterparty_name,
         "load_title": load.title,
         "fair_rate": estimate.recommended,
+        "lang": lang,
     }
     message = composer.compose(profile, as_role, move, load.currency or "USD", context)
 
@@ -200,6 +202,7 @@ def haggle(
     return {
         "move": move.to_dict(),
         "message": message,
+        "language": lang,
         "target_price": round(target_price, 2),
         "their_price": offer.price,
         "fair_rate": estimate.to_dict(),

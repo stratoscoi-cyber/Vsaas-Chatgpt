@@ -38,6 +38,17 @@
         <h2>API</h2>
         <label>LGaaS base URL</label>
         <input id="base" value="http://localhost:5003" />
+        <label>Haggle language</label>
+        <select id="lang">
+          <option value="">Auto (by region)</option>
+          <option value="en">English</option>
+          <option value="fr">Français</option>
+          <option value="pt">Português</option>
+          <option value="sw">Kiswahili</option>
+          <option value="ar">العربية</option>
+          <option value="ha">Hausa</option>
+        </select>
+        <p class="muted">Currency & language auto-localize from load origin (Africa-centric).</p>
       </div>
       <div class="card">
         <h2>Post a load</h2>
@@ -161,10 +172,9 @@
           haggle.onclick = async () => {
             try {
               const styles = await api("/api/negotiation-styles");
-              out(await api(`/api/offers/${o.id}/haggle`, jsonPost({
-                as_role: "shipper", negotiation_style: o.negotiation_style || styles.default,
-                counterparty_name: "Transporter",
-              })));
+              const body = { as_role: "shipper", negotiation_style: o.negotiation_style || styles.default, counterparty_name: "Transporter" };
+              if ($("lang").value) body.lang = $("lang").value;
+              out(await api(`/api/offers/${o.id}/haggle`, jsonPost(body)));
             } catch (e) { out("Error: " + e.message); }
           };
           const accept = document.createElement("button"); accept.textContent = `Accept #${o.id}`;
