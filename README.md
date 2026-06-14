@@ -291,11 +291,25 @@ Loads carry a **mode** and an auto-derived **scope**:
 | **Resilience** | `Idempotency-Key` header; `X-Tenant-ID`; admin audit log; Redis-backed event bus (`REDIS_URL`) | exactly-once mutations; auditable admin actions; SSE across workers |
 | **Channels & PWA** | `POST /api/notifications/send` (sms/whatsapp/push); `frontend/` PWA (manifest + service worker) | provider webhooks (console fallback); offline-capable app shell |
 | **KYC / verification** | `POST /api/compliance/documents/{id}/verify`, `POST /api/compliance/screen` (auto on document submit) | OCR/issuer verification + sanctions screening via a provider; **manual provider verifies nothing** — no fabricated verification |
-| **Multi-tenant isolation** | `X-Tenant-ID` header + `TENANT_ISOLATION=true` | rows stamped per tenant; reads scoped per tenant (cross-tenant access → 404) |
+| **Multi-tenant isolation** | `X-Tenant-ID` header + `TENANT_ISOLATION=true` | **central** SQLAlchemy guard auto-stamps new rows and filters **all** ORM reads for every tenant model (cross-tenant access → 404) |
+| **Service-station onboarding** | `POST /api/service-centers/{id}/submit`, `/risk`, `/reputation`; `POST /api/admin/service-centers/{id}/status` | regulatory compliance + risk assessment + reputation, lifecycle `pending→under_review→approved/rejected/suspended`; self-inspection rings auto-route to review |
 
 `KYC_ENDPOINT`/`SANCTIONS_ENDPOINT` plug real verification providers; without them
 documents stay unverified (operator/manual review). With `REDIS_URL` set, the SSE
 event bus uses Redis pub/sub so live tracking streams fan across gunicorn workers.
+
+**Tenant isolation is enforced centrally**: `tenants.install_tenant_guard` registers
+a `before_flush` hook (stamp `tenant_id` on every new row) and a `do_orm_execute`
+hook (apply a tenant predicate to every ORM SELECT, including joins, counts and
+lazy loads), so coverage is uniform across all endpoints rather than per-handler.
+
+**Service-station onboarding** is a state machine: a centre is registered, submits
+regulatory documents (per-region `required_service_center_docs` from approved
+agencies), and `submit` runs compliance + a risk assessment (self-inspection ring,
+re-used documents, anomalous 100% pass rate, poor reputation) to land it in
+`approved`, `rejected` or `under_review`. Admins transition status
+(approve/suspend/reinstate/reject) with an auditable reason, and reputation blends
+ratings with inspection pass-rate.
 
 These build on the same principles: deterministic logic over real data, with external
 providers (payment gateway, insurers, SMS/WhatsApp) behind adapters that do nothing
@@ -434,7 +448,7 @@ agri_platform/
   marketplace/   models, pricing, negotiation, service, tax_service, calendar_service,
                  tracking, routing_client, compliance, compliance_service, loads_planning,
                  reputation, telematics, payments, insurance, demand, fleet, trust,
-                 resilience, kyc, tenants, app, wsgi, Dockerfile   (LGaaS / prisaMove)
+                 resilience, kyc, tenants, service_centers, app, wsgi, Dockerfile
 migrations/      Alembic envs for wfaas / traas / lgaas
 frontend/        index.html (GIS dashboard) + marketplace.html (prisaMove)
 tests/           pytest suite

@@ -492,6 +492,8 @@ class RegionComplianceRule(Base):
     region_code = Column(String(8), unique=True, nullable=False, index=True)
     required_driver_docs = Column(JSON, default=list)   # e.g. ["drivers_license","permit","experience_proof"]
     required_vehicle_docs = Column(JSON, default=list)  # e.g. ["registration","insurance","roadworthiness"]
+    # e.g. ["accreditation","business_license","tax_certificate","equipment_certification"]
+    required_service_center_docs = Column(JSON, default=list)
     min_experience_years = Column(Float, default=2.0)
     min_insured_value = Column(Float, default=0.0)
     inspection_interval_days = Column(Integer, default=180)
@@ -504,6 +506,7 @@ class RegionComplianceRule(Base):
             "region_code": self.region_code,
             "required_driver_docs": self.required_driver_docs or [],
             "required_vehicle_docs": self.required_vehicle_docs or [],
+            "required_service_center_docs": self.required_service_center_docs or [],
             "min_experience_years": self.min_experience_years,
             "min_insured_value": self.min_insured_value,
             "inspection_interval_days": self.inspection_interval_days,
@@ -545,12 +548,19 @@ class ServiceCenter(Base):
     name = Column(String(160))
     owner_id = Column(String(50), index=True)
     region_code = Column(String(8))
+    business_reg_no = Column(String(80))
+    # Onboarding lifecycle: pending|under_review|approved|rejected|suspended
     compliance_status = Column(String(16), default="pending")
+    risk_score = Column(Float)
+    risk_band = Column(String(12))  # low|medium|high|critical
+    suspended_reason = Column(String(300))
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self):
         return {"center_id": self.center_id, "name": self.name, "owner_id": self.owner_id,
-                "region_code": self.region_code, "compliance_status": self.compliance_status,
+                "region_code": self.region_code, "business_reg_no": self.business_reg_no,
+                "compliance_status": self.compliance_status, "risk_score": self.risk_score,
+                "risk_band": self.risk_band, "suspended_reason": self.suspended_reason,
                 "created_at": self.created_at.isoformat() if self.created_at else None}
 
 
@@ -561,6 +571,7 @@ class ComplianceDocument(Base):
 
     id = Column(Integer, primary_key=True)
     entity_type = Column(String(20), index=True)  # driver|vehicle|service_center
+    tenant_id = Column(String(50), index=True)
     entity_id = Column(String(50), index=True)
     doc_type = Column(String(40))                 # drivers_license|permit|insurance|registration|...
     reference = Column(String(120))               # document number
@@ -591,6 +602,7 @@ class Inspection(Base):
 
     id = Column(Integer, primary_key=True)
     vehicle_id = Column(String(50), index=True)
+    tenant_id = Column(String(50), index=True)
     center_id = Column(String(50))
     performed_on = Column(String(10))
     result = Column(String(10))      # pass|fail
@@ -612,6 +624,7 @@ class ComplianceDecision(Base):
 
     id = Column(Integer, primary_key=True)
     entity_type = Column(String(20), index=True)
+    tenant_id = Column(String(50), index=True)
     entity_id = Column(String(50), index=True)
     decision = Column(String(16))    # approved|rejected|review
     reasons = Column(JSON, default=list)
@@ -661,6 +674,7 @@ class Rating(Base):
 
     id = Column(Integer, primary_key=True)
     subject_type = Column(String(16), index=True)  # carrier|driver|shipper
+    tenant_id = Column(String(50), index=True)
     subject_id = Column(String(50), index=True)
     rater_id = Column(String(50))
     shipment_id = Column(String(50))
@@ -751,7 +765,8 @@ class Escrow(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self):
-        return {"escrow_id": self.escrow_id, "shipment_id": self.shipment_id, "load_ref": self.load_ref,
+        return {"escrow_id": self.escrow_id, "tenant_id": self.tenant_id,
+                "shipment_id": self.shipment_id, "load_ref": self.load_ref,
                 "payer_id": self.payer_id, "payee_id": self.payee_id, "amount": self.amount,
                 "currency": self.currency, "status": self.status, "provider": self.provider,
                 "provider_ref": self.provider_ref,
@@ -764,6 +779,7 @@ class ProofOfDelivery(Base):
 
     id = Column(Integer, primary_key=True)
     shipment_id = Column(String(50), index=True)
+    tenant_id = Column(String(50), index=True)
     recipient_name = Column(String(120))
     signature_ref = Column(String(200))
     photo_refs = Column(JSON, default=list)
@@ -783,6 +799,7 @@ class Settlement(Base):
 
     id = Column(Integer, primary_key=True)
     escrow_id = Column(String(50), index=True)
+    tenant_id = Column(String(50), index=True)
     gross = Column(Float)
     tax_total = Column(Float)
     withheld = Column(Float)
@@ -825,6 +842,7 @@ class InsurancePolicy(Base):
 
     id = Column(Integer, primary_key=True)
     policy_id = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
     load_ref = Column(String(50), index=True)
     shipment_id = Column(String(50))
     insurer_code = Column(String(50))
@@ -847,6 +865,7 @@ class InsuranceClaim(Base):
 
     id = Column(Integer, primary_key=True)
     claim_id = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
     policy_id = Column(String(50), index=True)
     shipment_id = Column(String(50))
     reason = Column(String(200))
@@ -900,6 +919,7 @@ class KycCheck(Base):
 
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, index=True)
+    tenant_id = Column(String(50), index=True)
     entity_type = Column(String(20))
     entity_id = Column(String(50))
     provider = Column(String(40))

@@ -80,7 +80,9 @@ def _check_document(
 
 
 # Document types whose issuer must be an approved agency.
-ISSUER_REQUIRED = {"drivers_license", "permit", "insurance", "roadworthiness", "registration"}
+ISSUER_REQUIRED = {"drivers_license", "permit", "insurance", "roadworthiness", "registration",
+                   "accreditation", "business_license", "tax_certificate", "equipment_certification",
+                   "environmental_permit"}
 
 
 def _evaluate_docs(required: List[str], docs: List[Dict], approved: Set[str], as_of: date):
@@ -165,8 +167,9 @@ def evaluate_service_center(center: Dict, docs: List[Dict], rule: Optional[Dict]
     as_of = as_of or date.today()
     if not rule:
         return Decision(REVIEW, reasons=["no compliance rule configured for region"])
-    # A service centre must hold an accreditation issued by an approved agency.
-    reasons, warnings = _evaluate_docs(["accreditation"], docs, approved_agencies, as_of)
+    # Regulatory documents required of a service centre (accreditation at minimum).
+    required = rule.get("required_service_center_docs") or ["accreditation"]
+    reasons, warnings = _evaluate_docs(required, docs, approved_agencies, as_of)
     return Decision(REJECTED if reasons else APPROVED, reasons=reasons, warnings=warnings)
 
 

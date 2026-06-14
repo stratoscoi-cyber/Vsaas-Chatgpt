@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from .models import Rating, Shipment
+from .models import Inspection, Rating, Shipment
 
 
 def add_rating(session, *, subject_type: str, subject_id: str, score: float,
@@ -49,6 +49,11 @@ def reputation(session, subject_type: str, subject_id: str) -> Dict:
         perf = performance(session, subject_id)
         result["performance"] = perf
         result["score"] = _composite(avg, perf)
+    elif subject_type == "service_center":
+        rows = session.query(Inspection).filter_by(center_id=subject_id).all()
+        passes = sum(1 for r in rows if r.result == "pass")
+        result["performance"] = {"inspections": len(rows), "passes": passes,
+                                 "pass_rate": round(passes / len(rows), 3) if rows else None}
     return result
 
 

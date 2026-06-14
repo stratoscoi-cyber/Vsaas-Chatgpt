@@ -34,8 +34,8 @@ from ..common.eventbus import make_event_bus
 from ..common.holiday_provider import make_holiday_provider
 from . import (
     calendar_service, compliance_service, demand, fleet, insurance, kyc, loads_planning,
-    negotiation, payments, reputation, resilience, service, tax_service, telematics,
-    tenants, tracking, trust,
+    negotiation, payments, reputation, resilience, service, service_centers, tax_service,
+    telematics, tenants, tracking, trust,
 )
 from .routing_client import make_traas_client
 from .models import (
@@ -82,6 +82,7 @@ def create_app(
     app.config["TRACKING_NOTIFIER"] = tracking.CompositeNotifier([tracking.BusTrackingNotifier(bus), base_notifier])
     app.config["COMPLIANCE_ENFORCED"] = settings.compliance_enforced
     app.config["TENANT_ISOLATION"] = settings.tenant_isolation
+    tenants.install_tenant_guard(session_factory, Base, lambda: app.config["TENANT_ISOLATION"])
     app.config["KYC_PROVIDER"] = kyc.make_kyc_provider(settings)
     app.config["PAYMENT_GATEWAY"] = payments.ManualGateway()
     app.config["CHANNELS"] = build_channels({
@@ -875,9 +876,9 @@ def create_app(
         if rule is None:
             rule = RegionComplianceRule(region_code=data["region_code"])
             session.add(rule)
-        for f in ("required_driver_docs", "required_vehicle_docs", "min_experience_years",
-                  "min_insured_value", "inspection_interval_days", "require_tracker",
-                  "require_onboard_camera", "active"):
+        for f in ("required_driver_docs", "required_vehicle_docs", "required_service_center_docs",
+                  "min_experience_years", "min_insured_value", "inspection_interval_days",
+                  "require_tracker", "require_onboard_camera", "active"):
             if f in data:
                 setattr(rule, f, data[f])
         session.commit()
@@ -913,11 +914,55 @@ def create_app(
             raise ApiError("service center already exists", status_code=409, code="conflict")
         center = ServiceCenter(center_id=data["center_id"], name=data.get("name"),
                                owner_id=data.get("owner_id"), region_code=data.get("region_code"),
-                               compliance_status="pending")
+                               business_reg_no=data.get("business_reg_no"), compliance_status="pending")
         tenants.stamp(center)
         session.add(center)
         session.commit()
         return jsonify(center.to_dict()), 201
+
+    @app.get("/api/service-centers")
+    def list_service_centers():
+        q = db().query(ServiceCenter).order_by(ServiceCenter.id.desc())
+        for f in ("region_code", "compliance_status", "owner_id"):
+            if request.args.get(f):
+                q = q.filter_by(**{f: request.args[f]})
+        page, size = page_params()
+        items, meta = paginate(q, page, size)
+        return jsonify(service_centers=[c.to_dict() for c in items], pagination=meta)
+
+    def _center_or_404(session, cid) -> ServiceCenter:
+        center = session.query(ServiceCenter).filter_by(center_id=cid).first()
+        if center is None:
+            raise ApiError("service center not found", status_code=404, code="not_found")
+        return center
+
+    @app.get("/api/service-centers/<cid>")
+    def get_service_center(cid):
+        return jsonify(service_centers.profile(db(), _center_or_404(db(), cid)))
+
+    @app.get("/api/service-centers/<cid>/risk")
+    def service_center_risk(cid):
+        session = db()
+        center = _center_or_404(session, cid)
+        return jsonify(service_centers.risk_assessment(session, center))
+
+    @app.get("/api/service-centers/<cid>/reputation")
+    def service_center_reputation(cid):
+        _center_or_404(db(), cid)
+        return jsonify(reputation.reputation(db(), "service_center", cid))
+
+    @app.post("/api/admin/service-centers/<cid>/status")
+    def transition_service_center(cid):
+        data = get_json()
+        require(data, "action", "decided_by")
+        session = db()
+        center = _center_or_404(session, cid)
+        try:
+            out = service_centers.transition(session, center, data["action"],
+                                             reason=data.get("reason"), decided_by=data["decided_by"])
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(out)
 
     @app.post("/api/compliance/documents")
     def add_document():
@@ -1018,10 +1063,8 @@ def create_app(
     @app.post("/api/service-centers/<cid>/submit")
     def submit_center(cid):
         session = db()
-        center = session.query(ServiceCenter).filter_by(center_id=cid).first()
-        if center is None:
-            raise ApiError("service center not found", status_code=404, code="not_found")
-        return jsonify(compliance_service.evaluate_service_center(session, center).to_dict())
+        center = _center_or_404(session, cid)
+        return jsonify(service_centers.submit(session, center))
 
     @app.get("/api/compliance/decisions")
     def list_decisions():
