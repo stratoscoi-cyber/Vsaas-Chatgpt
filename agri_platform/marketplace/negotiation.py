@@ -183,13 +183,17 @@ class TemplateComposer:
     requested language (``context['lang']``), via the i18n catalog."""
 
     def compose(self, profile, role, move, currency, context=None) -> str:
+        from ..common import currency as currency_mod
         from ..common import i18n
 
         context = context or {}
         lang = context.get("lang", i18n.DEFAULT_LANGUAGE)
         name = context.get("counterparty_name")
         warm = profile.relationship_emphasis >= 0.6
-        money = f"{currency} {move.counter_price:,.2f}" if move.counter_price is not None else currency
+        money = (
+            currency_mod.format_amount(move.counter_price, currency, lang)
+            if move.counter_price is not None else currency
+        )
         lines: List[str] = []
 
         greeting = i18n.translate("greeting.warm" if warm else "greeting.default", lang)
@@ -214,7 +218,7 @@ class TemplateComposer:
         lines.append(body)
 
         if context.get("fair_rate") and profile.directness < 0.7:
-            fair = f"{currency} {float(context['fair_rate']):,.2f}"
+            fair = currency_mod.format_amount(float(context["fair_rate"]), currency, lang)
             lines.append(i18n.translate("fair.reference", lang, price=fair))
 
         lines.append(i18n.translate("closing.warm" if warm else "closing.default", lang))

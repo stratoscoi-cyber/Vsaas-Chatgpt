@@ -198,6 +198,56 @@ class TaxRule(Base):
         }
 
 
+class Holiday(Base):
+    """An operator-configured public holiday for a region.
+
+    The platform ships with none; administrators enter the real gazetted dates.
+    ``recurrence`` is ``fixed`` (month/day, recurs yearly) or ``date`` (a single
+    observed ISO date, for movable/gazetted holidays).
+    """
+
+    __tablename__ = "holidays"
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String(50), unique=True, nullable=False, index=True)
+    region_code = Column(String(8), index=True)  # ISO-3166 alpha-2
+    name = Column(String(160))
+    recurrence = Column(String(10), default="fixed")  # fixed | date
+    month = Column(Integer)   # for fixed
+    day = Column(Integer)     # for fixed
+    date = Column(String(10)) # for one-off (ISO YYYY-MM-DD)
+    note = Column(String(300))
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "code": self.code,
+            "region_code": self.region_code,
+            "name": self.name,
+            "recurrence": self.recurrence,
+            "month": self.month,
+            "day": self.day,
+            "date": self.date,
+            "note": self.note,
+            "active": self.active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    def to_rule(self):
+        return {
+            "code": self.code,
+            "name": self.name,
+            "recurrence": self.recurrence or "fixed",
+            "month": self.month,
+            "day": self.day,
+            "date": self.date,
+            "active": self.active,
+        }
+
+
 class NegotiationMessage(Base):
     """A single turn in a load's negotiation thread."""
 

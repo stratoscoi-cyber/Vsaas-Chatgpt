@@ -22,10 +22,11 @@ from ..common.logging import configure_logging, install_request_logging
 from ..common.pagination import page_params, paginate
 from ..common.ratelimit import RateLimiter, install_rate_limiting
 from ..common.security import install_admin_auth, install_auth
+from ..common import currency as currency_mod
 from ..common import regions
 from ..common import tax as tax_engine
-from . import negotiation, service, tax_service
-from .models import Base, Load, NegotiationMessage, Offer, TaxRule, Vehicle
+from . import calendar_service, negotiation, service, tax_service
+from .models import Base, Holiday, Load, NegotiationMessage, Offer, TaxRule, Vehicle
 
 SERVICE_NAME = "lgaas"
 BRAND = "prisaMove"
@@ -144,6 +145,10 @@ def create_app(
         body = load.to_dict()
         if region is not None:
             body["region"] = region.to_dict()
+        deadline = _parse_iso_date(load.delivery_deadline) if load.delivery_deadline else None
+        if deadline is not None:
+            body["schedule"] = calendar_service.schedule_info(
+                session, region.code if region else app.config["DEFAULT_REGION_CODE"], deadline)
         return jsonify(body), 201
 
     @app.get("/api/loads")
@@ -179,6 +184,9 @@ def create_app(
             return region.code
         return app.config["DEFAULT_REGION_CODE"]
 
+    def _money(amount, code) -> str:
+        return currency_mod.format_amount(amount, code, current_lang())
+
     @app.post("/api/loads/<ref>/estimate")
     def estimate_load(ref):
         data = get_json()
@@ -194,9 +202,12 @@ def create_app(
             base_amount=est.recommended,
             region_code=_region_code_for(load.origin),
             category=data.get("category", "transport_service"),
-            currency=load.currency or "USD",
+            currency_code=load.currency or "USD",
+            locale=current_lang(),
         )
-        return jsonify(load_ref=ref, estimate=est.to_dict(), tax=tax)
+        est_dict = est.to_dict()
+        est_dict["recommended_formatted"] = _money(est.recommended, load.currency or "USD")
+        return jsonify(load_ref=ref, estimate=est_dict, tax=tax)
 
     @app.post("/api/estimate")
     def estimate_adhoc():
@@ -224,9 +235,12 @@ def create_app(
             base_amount=est.recommended,
             region_code=region.code if region else app.config["DEFAULT_REGION_CODE"],
             category=data.get("category", "transport_service"),
-            currency=currency,
+            currency_code=currency,
+            locale=current_lang(),
         )
-        return jsonify(estimate=est.to_dict(), tax=tax, region=region.to_dict() if region else None)
+        est_dict = est.to_dict()
+        est_dict["recommended_formatted"] = _money(est.recommended, currency)
+        return jsonify(estimate=est_dict, tax=tax, region=region.to_dict() if region else None)
 
     # --- vehicles --------------------------------------------------------------
     @app.post("/api/vehicles")
@@ -398,7 +412,8 @@ def create_app(
             base_amount=base,
             region_code=region_code,
             category=data.get("category", "transport_service"),
-            currency=data.get("currency", "USD"),
+            currency_code=data.get("currency", "USD"),
+            locale=current_lang(),
             on_date=_parse_iso_date(data.get("on_date")),
         )
         return jsonify(result)
@@ -492,7 +507,113 @@ def create_app(
         session.commit()
         return jsonify(rule.to_dict())
 
+    # --- region cultural profile ----------------------------------------------
+    @app.get("/api/regions/<code>/profile")
+    def region_profile(code):
+        region = regions.lookup(code)
+        if region is None:
+            raise ApiError("region not found", status_code=404, code="not_found")
+        from datetime import date as _date
+        cur = currency_mod.get_currency(region.currency)
+        return jsonify(
+            region=region.to_dict(),
+            currency=cur.to_dict(),
+            sample_amount=currency_mod.format_amount(1234567.5, region.currency, current_lang()),
+            default_negotiation_style=region.default_negotiation_style,
+            negotiation_profile=negotiation.get_profile(region.default_negotiation_style).to_dict(),
+            weekend=list(region.weekend),
+            upcoming_holidays=calendar_service.upcoming(db(), code, _date.today()),
+        )
+
+    # --- public holidays (admin) ----------------------------------------------
+    @app.post("/api/admin/holidays")
+    def create_holiday():
+        data = get_json()
+        require(data, "code", "region_code", "name", "recurrence")
+        if data["recurrence"] not in ("fixed", "date"):
+            raise ApiError("recurrence must be 'fixed' or 'date'", status_code=422, code="validation_error")
+        if data["recurrence"] == "fixed" and not (data.get("month") and data.get("day")):
+            raise ApiError("fixed holidays require month and day", status_code=422, code="validation_error")
+        if data["recurrence"] == "date" and not data.get("date"):
+            raise ApiError("one-off holidays require a date", status_code=422, code="validation_error")
+        session = db()
+        if session.query(Holiday).filter_by(code=data["code"]).first():
+            raise ApiError("holiday code already exists", status_code=409, code="conflict")
+        holiday = Holiday(
+            code=data["code"], region_code=data["region_code"], name=data["name"],
+            recurrence=data["recurrence"], month=data.get("month"), day=data.get("day"),
+            date=data.get("date"), note=data.get("note"), active=bool(data.get("active", True)),
+        )
+        session.add(holiday)
+        session.commit()
+        return jsonify(holiday.to_dict()), 201
+
+    @app.get("/api/admin/holidays")
+    def list_admin_holidays():
+        q = db().query(Holiday).order_by(Holiday.region_code, Holiday.code)
+        if request.args.get("region_code"):
+            q = q.filter_by(region_code=request.args["region_code"])
+        page, size = page_params()
+        items, meta = paginate(q, page, size)
+        return jsonify(holidays=[h.to_dict() for h in items], pagination=meta)
+
+    @app.put("/api/admin/holidays/<code>")
+    def update_holiday(code):
+        data = get_json()
+        session = db()
+        holiday = session.query(Holiday).filter_by(code=code).first()
+        if holiday is None:
+            raise ApiError("holiday not found", status_code=404, code="not_found")
+        for field in ("region_code", "name", "recurrence", "month", "day", "date", "note", "active"):
+            if field in data:
+                setattr(holiday, field, data[field])
+        from datetime import datetime as _dt
+        holiday.updated_at = _dt.utcnow()
+        session.commit()
+        return jsonify(holiday.to_dict())
+
+    @app.delete("/api/admin/holidays/<code>")
+    def delete_holiday(code):
+        session = db()
+        holiday = session.query(Holiday).filter_by(code=code).first()
+        if holiday is None:
+            raise ApiError("holiday not found", status_code=404, code="not_found")
+        if request.args.get("hard", "").lower() == "true":
+            session.delete(holiday)
+            session.commit()
+            return jsonify(deleted=code, hard=True)
+        holiday.active = False
+        session.commit()
+        return jsonify(holiday.to_dict())
+
+    # --- public holidays / business-day calendar -------------------------------
+    @app.get("/api/holidays")
+    def public_holidays():
+        from datetime import date as _date
+        region_code = request.args.get("region") or app.config["DEFAULT_REGION_CODE"]
+        year = int(request.args.get("year", _date.today().year))
+        return jsonify(region_code=region_code, year=year,
+                       holidays=calendar_service.resolve_year(db(), region_code, year))
+
+    @app.get("/api/calendar/business-day")
+    def business_day():
+        d = _parse_iso_date(request.args.get("date")) or _today_date()
+        region_code = request.args.get("region") or app.config["DEFAULT_REGION_CODE"]
+        info = calendar_service.schedule_info(db(), region_code, d)
+        if request.args.get("add"):
+            n = int(request.args["add"])
+            info["plus_business_days"] = {
+                "n": n,
+                "date": calendar_service.add_business_days(db(), region_code, d, n).isoformat(),
+            }
+        return jsonify(info)
+
     return app
+
+
+def _today_date():
+    from datetime import date as _date
+    return _date.today()
 
 
 def _parse_iso_date(value):

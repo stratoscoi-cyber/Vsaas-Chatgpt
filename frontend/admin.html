@@ -85,6 +85,30 @@
         </div>
         <button id="quote" class="ghost">Compute tax</button>
       </div>
+      <div class="card">
+        <div class="banner">Enter real, gazetted public-holiday dates per region.
+          Use a one-off date for movable/observed holidays.</div>
+        <h2>Add public holiday</h2>
+        <div class="row">
+          <div><label>Code</label><input id="h_code" placeholder="NG-NEWYEAR" /></div>
+          <div><label>Region</label><select id="h_region"></select></div>
+        </div>
+        <label>Name</label><input id="h_name" placeholder="New Year's Day" />
+        <div class="row">
+          <div><label>Recurrence</label><select id="h_rec"><option value="fixed">fixed (yearly)</option><option value="date">date (one-off)</option></select></div>
+          <div><label>Month</label><input id="h_month" placeholder="1" /></div>
+          <div><label>Day</label><input id="h_day" placeholder="1" /></div>
+        </div>
+        <label>One-off date (for movable holidays)</label><input id="h_date" placeholder="2026-03-20" />
+        <button id="h_save">Save holiday</button>
+      </div>
+      <div class="card">
+        <h2>Region cultural profile</h2>
+        <div class="row">
+          <div><label>Region</label><select id="p_region"></select></div>
+          <div style="flex:0 0 auto;align-self:flex-end;"><button id="p_go" class="ghost">View</button></div>
+        </div>
+      </div>
     </div>
     <div>
       <div class="card">
@@ -111,13 +135,33 @@
 
     async function loadRegions() {
       try {
-        const { regions, default: def } = await api("/api/regions");
-        const opts = ['<option value="*">* (all regions)</option>']
+        const { regions } = await api("/api/regions");
+        const withStar = ['<option value="*">* (all regions)</option>']
           .concat(regions.map((r) => `<option value="${r.code}">${r.code} — ${r.name} (${r.currency})</option>`));
-        $("f_region").innerHTML = opts.join("");
-        $("q_region").innerHTML = regions.map((r) => `<option value="${r.code}">${r.code} — ${r.name}</option>`).join("");
+        const plain = regions.map((r) => `<option value="${r.code}">${r.code} — ${r.name}</option>`).join("");
+        $("f_region").innerHTML = withStar.join("");
+        $("q_region").innerHTML = plain;
+        $("h_region").innerHTML = plain;
+        $("p_region").innerHTML = plain;
       } catch (e) { out("Error loading regions: " + e.message); }
     }
+
+    $("h_save").onclick = async () => {
+      const payload = {
+        code: $("h_code").value, region_code: $("h_region").value, name: $("h_name").value,
+        recurrence: $("h_rec").value,
+        month: $("h_month").value ? parseInt($("h_month").value) : null,
+        day: $("h_day").value ? parseInt($("h_day").value) : null,
+        date: $("h_date").value || null,
+      };
+      try { out(await api("/api/admin/holidays", { method: "POST", headers: adminHeaders(), body: JSON.stringify(payload) })); }
+      catch (e) { out("Error: " + e.message); }
+    };
+
+    $("p_go").onclick = async () => {
+      try { out(await api(`/api/regions/${$("p_region").value}/profile`)); }
+      catch (e) { out("Error: " + e.message); }
+    };
 
     $("connect").onclick = async () => { await loadRules(); out("Connected."); };
     $("reload").onclick = loadRules;

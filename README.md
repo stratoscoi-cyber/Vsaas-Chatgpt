@@ -126,6 +126,9 @@ hazards (`POST/GET /api/hazards`, `DELETE /api/hazards/{id}`) ·
 | `GET /api/negotiation-styles` | available negotiation-style profiles |
 | `POST /api/tax/quote` | compute statutory tax for an amount (admin-configured rules) |
 | `/api/admin/tax-rules*` | **admin-only** tax/VAT/levy rule management (`X-Admin-Key`) |
+| `GET /api/holidays` · `GET /api/calendar/business-day` | public-holiday & business-day calendar |
+| `/api/admin/holidays*` | **admin-only** public-holiday management (`X-Admin-Key`) |
+| `GET /api/regions/{code}/profile` | region cultural profile (currency, weekend, style, holidays) |
 
 ```bash
 # Post a load, get a fair quote, bid, then ask the AI to haggle as the shipper
@@ -193,6 +196,28 @@ curl -s localhost:5003/api/offers/1/haggle -H 'content-type: application/json' \
 
 > The negotiation-style profiles and language catalogs are configurable
 > conventions, not assumptions about individuals; extend or override them freely.
+
+### Currency, public holidays & cultural nuance
+
+- **Currency localization** (`common/currency.py`) — ISO 4217 reference data
+  (symbol, minor units, placement) for every region's currency, formatted per
+  locale (e.g. `₦1,234.50`, `1 000 CFA`, `$1 234,50` in French). Used in haggling
+  messages, quotes and tax breakdowns. Endpoints (all services):
+  `GET /api/i18n/currencies`, `GET /api/i18n/format?amount=&currency=`.
+- **Public holidays** (`common/holidays.py` + LGaaS) — **admin-managed**, same
+  no-fabrication rule as tax: the platform ships with **no holidays**; an admin
+  enters the real gazetted dates (`fixed` recurring or one-off `date` for movable
+  holidays). The engine does the calendar maths (is-holiday, business-day,
+  next-business-day, add-business-days) honouring each region's weekend.
+  - Admin: `/api/admin/holidays` (CRUD, `X-Admin-Key`).
+  - Public: `GET /api/holidays?region=&year=`,
+    `GET /api/calendar/business-day?region=&date=&add=`.
+  - Loads with a `delivery_deadline` automatically get a `schedule` block
+    (is-holiday / next business day).
+- **Cultural nuance** — each region carries a **weekend** (e.g. Egypt Fri–Sat vs
+  Sat–Sun elsewhere) and a default **negotiation-style** preset.
+  `GET /api/regions/{code}/profile` returns the region, currency, weekend,
+  negotiation profile and upcoming holidays.
 
 ## Tax / VAT / statutory payments (admin-managed)
 
@@ -270,7 +295,7 @@ routing / inference collaborators — no network required.
 ```
 agri_platform/
   common/        config, logging, errors, security, ratelimit, cache, pagination,
-                 geo, weather, db, regions, i18n, localization, tax
+                 geo, weather, db, regions, i18n, localization, currency, tax, holidays
   wfaas/         models, service, notifications, monitoring, ai, app, wsgi, Dockerfile
   traas/         models, routing, service, app, wsgi, Dockerfile
   marketplace/   models, pricing, negotiation, service, app, wsgi, Dockerfile   (LGaaS / prisaMove)

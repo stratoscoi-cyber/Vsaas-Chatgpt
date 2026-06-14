@@ -87,7 +87,7 @@ def test_template_composer_adapts_to_style():
         {"counterparty_name": "Mr Bello", "load_title": "Tomatoes"},
     )
     assert "family" in msg.lower() or "partnership" in msg.lower()  # relationship emphasis
-    assert "USD" in msg
+    assert "$" in msg  # USD formatted with its symbol
 
 
 def test_build_custom_profile():

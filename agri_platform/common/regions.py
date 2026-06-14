@@ -13,8 +13,12 @@ admin-0 layer.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+
+# Monday=0 .. Sunday=6. Default rest days are Saturday & Sunday.
+DEFAULT_WEEKEND: Tuple[int, ...] = (5, 6)
 
 
 @dataclass(frozen=True)
@@ -25,6 +29,10 @@ class Region:
     currency: str        # ISO-4217
     timezone: str
     bbox: Tuple[float, float, float, float]  # (lon_min, lat_min, lon_max, lat_max)
+    weekend: Tuple[int, ...] = DEFAULT_WEEKEND
+    # Default negotiation-style preset (a configurable convention, not an
+    # assumption about individuals); see marketplace.negotiation.PROFILES.
+    default_negotiation_style: str = "relationship_first"
 
     @property
     def primary_language(self) -> str:
@@ -39,6 +47,8 @@ class Region:
             "currency": self.currency,
             "timezone": self.timezone,
             "bbox": list(self.bbox),
+            "weekend": list(self.weekend),
+            "default_negotiation_style": self.default_negotiation_style,
         }
 
 
@@ -72,6 +82,20 @@ REGIONS: Tuple[Region, ...] = (
     Region("EG", "Egypt", ("ar", "en"), "EGP", "Africa/Cairo", (25.0, 22.0, 36.0, 31.7)),
     Region("MA", "Morocco", ("ar", "fr"), "MAD", "Africa/Casablanca", (-13.2, 27.7, -1.0, 35.9)),
     Region("TN", "Tunisia", ("ar", "fr"), "TND", "Africa/Tunis", (7.5, 30.2, 11.6, 37.6)),
+)
+
+# Cultural-nuance overrides: rest days and a default negotiation-style preset.
+# Friday–Saturday weekends are used where that is the official rest period.
+_OVERRIDES = {
+    "EG": {"weekend": (4, 5), "default_negotiation_style": "high_context_formal"},
+    "MA": {"default_negotiation_style": "high_context_formal"},
+    "TN": {"default_negotiation_style": "high_context_formal"},
+    "ZA": {"default_negotiation_style": "consensus"},
+    "NG": {"default_negotiation_style": "market_bargaining"},
+}
+REGIONS = tuple(
+    dataclasses.replace(r, **_OVERRIDES[r.code]) if r.code in _OVERRIDES else r
+    for r in REGIONS
 )
 
 _BY_CODE = {r.code: r for r in REGIONS}
