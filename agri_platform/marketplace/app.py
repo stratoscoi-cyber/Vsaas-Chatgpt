@@ -34,7 +34,7 @@ from ..common.eventbus import make_event_bus
 from ..common.holiday_provider import make_holiday_provider
 from . import (
     calendar_service, compliance_service, demand, fleet, insurance, kyc, loads_planning,
-    negotiation, onboarding, payments, reputation, resilience, service, service_centers,
+    negotiation, onboarding, ops, payments, reputation, resilience, service, service_centers,
     tax_service, telematics, tenants, tracking, trust,
 )
 from .routing_client import make_traas_client
@@ -1462,6 +1462,40 @@ def create_app(
     @app.get("/api/trust/clusters")
     def trust_clusters():
         return jsonify(clusters=trust.collusion_clusters(db()))
+
+    # --- ops console (admin) ---------------------------------------------------
+    @app.get("/api/admin/ops/dashboard")
+    def ops_dashboard():
+        return jsonify(ops.dashboard(db()))
+
+    @app.get("/api/admin/ops/review-queue")
+    def ops_review_queue_admin():
+        return jsonify(queue=ops.review_queue(db(), request.args.get("entity_type")),
+                       clusters=trust.collusion_clusters(db()))
+
+    @app.get("/api/admin/ops/audit")
+    def ops_audit():
+        return jsonify(audit=ops.audit(db(), int(request.args.get("limit", 100))))
+
+    @app.get("/api/admin/ops/entities/<entity_type>/<entity_id>")
+    def ops_entity(entity_type, entity_id):
+        profile = ops.entity_profile(db(), entity_type, entity_id)
+        if profile is None:
+            raise ApiError("entity not found", status_code=404, code="not_found")
+        return jsonify(profile)
+
+    @app.post("/api/admin/ops/entities/<entity_type>/<entity_id>/status")
+    def ops_transition(entity_type, entity_id):
+        data = get_json()
+        require(data, "action", "decided_by")
+        try:
+            out = ops.transition(db(), entity_type, entity_id, data["action"],
+                                 reason=data.get("reason"), decided_by=data["decided_by"])
+        except LookupError as exc:
+            raise ApiError(str(exc), status_code=404, code="not_found")
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(out)
 
     # --- notifications channels (SMS/WhatsApp/push) ----------------------------
     @app.post("/api/notifications/send")

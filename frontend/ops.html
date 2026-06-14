@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#2f7d4f" />
+  <title>prisaMove — Ops Console</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #0c1117; color: #e8edf2; }
+    header { padding: 14px 20px; background: #11161d; border-bottom: 1px solid #2a3645; display: flex; gap: 12px; align-items: baseline; }
+    header h1 { margin: 0; font-size: 18px; color: #46b06a; }
+    header span { color: #8aa0b4; font-size: 12px; }
+    header a { margin-left: auto; color: #8aa0b4; font-size: 13px; }
+    main { padding: 16px; display: grid; grid-template-columns: 300px 1fr; gap: 16px; }
+    .card { background: #11161d; border: 1px solid #2a3645; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #8aa0b4; margin: 0 0 10px; }
+    label { display: block; font-size: 12px; margin: 8px 0 3px; color: #aebfce; }
+    input, select { width: 100%; padding: 7px 8px; border-radius: 6px; border: 1px solid #2a3645; background: #0c1117; color: #e8edf2; font-size: 13px; }
+    button { margin-top: 8px; padding: 7px 10px; border: 0; border-radius: 6px; background: #2f7d4f; color: #fff; font-size: 12px; cursor: pointer; }
+    button.ghost { background: #243140; } button.warn { background: #b4471f; } button.mut { background: #555f6b; }
+    .tiles { display: flex; gap: 10px; flex-wrap: wrap; }
+    .tile { background: #0c1117; border: 1px solid #2a3645; border-radius: 8px; padding: 10px 14px; min-width: 110px; }
+    .tile b { font-size: 22px; color: #46b06a; display: block; }
+    .tile span { font-size: 11px; color: #8aa0b4; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a3645; vertical-align: top; }
+    th { color: #8aa0b4; }
+    .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 10px; }
+    .b-low { background: #1f4a2e; } .b-medium { background: #5a4a1f; } .b-high { background: #6a3a1f; } .b-critical { background: #6a1f1f; }
+    .muted { color: #6f8295; }
+    pre { white-space: pre-wrap; font-size: 11px; background: #0c1117; border: 1px solid #2a3645; border-radius: 6px; padding: 10px; max-height: 320px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>prisaMove · Ops Console</h1>
+    <span>review queue · risk · audit</span>
+    <a href="marketplace.html">← Marketplace</a>
+  </header>
+  <main>
+    <div>
+      <div class="card">
+        <h2>Connection</h2>
+        <label>LGaaS base URL</label><input id="base" value="http://localhost:5003" />
+        <label>Admin API key</label><input id="key" type="password" placeholder="ADMIN_API_KEYS value" />
+        <label>Filter entity type</label>
+        <select id="etype">
+          <option value="">All</option>
+          <option>driver</option><option>vehicle</option><option>service_center</option>
+          <option>logistics_operator</option><option>fleet_manager</option>
+          <option>inspection_agent</option><option>msp</option>
+        </select>
+        <button id="refresh">Load</button>
+      </div>
+      <div class="card">
+        <h2>High risk</h2>
+        <div id="highrisk" class="muted">—</div>
+      </div>
+    </div>
+    <div>
+      <div class="card"><h2>Dashboard</h2><div id="tiles" class="tiles muted">Connect to load.</div></div>
+      <div class="card">
+        <h2>Review queue</h2>
+        <table id="queue"><thead><tr><th>Entity</th><th>Type</th><th>Risk</th><th>Signals</th><th>Reasons</th><th>Actions</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card"><h2>Detail / audit</h2><pre id="out">Select a queue row to drill in, or load the audit trail.</pre>
+        <button id="auditBtn" class="ghost">Load audit trail</button></div>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const base = () => $("base").value.replace(/\/$/, "");
+    const out = (o) => { $("out").textContent = typeof o === "string" ? o : JSON.stringify(o, null, 2); };
+    const H = () => ({ "Content-Type": "application/json", "X-Admin-Key": $("key").value });
+
+    async function api(path, opts = {}) {
+      const r = await fetch(base() + path, { headers: H(), ...opts });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((b.error && b.error.message) || ("HTTP " + r.status));
+      return b;
+    }
+
+    $("refresh").onclick = loadAll;
+    $("auditBtn").onclick = async () => { try { out(await api("/api/admin/ops/audit?limit=50")); } catch (e) { out("Error: " + e.message); } };
+
+    async function loadAll() {
+      try {
+        const dash = await api("/api/admin/ops/dashboard");
+        const tiles = [["Review", dash.review_count]].concat(Object.entries(dash.by_status));
+        $("tiles").className = "tiles";
+        $("tiles").innerHTML = tiles.map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join("");
+        $("highrisk").innerHTML = dash.high_risk.length
+          ? dash.high_risk.map((h) => `<div>${h.entity_type} <b>${h.entity_id}</b> <span class="pill b-${h.risk_band}">${h.risk_band}</span></div>`).join("")
+          : '<span class="muted">none</span>';
+        await loadQueue();
+      } catch (e) { out("Error: " + e.message); }
+    }
+
+    async function loadQueue() {
+      const et = $("etype").value;
+      const { queue } = await api("/api/admin/ops/review-queue" + (et ? "?entity_type=" + et : ""));
+      const tb = $("queue").querySelector("tbody");
+      tb.innerHTML = queue.length ? "" : '<tr><td colspan="6" class="muted">Queue is clear.</td></tr>';
+      for (const d of queue) {
+        const tr = document.createElement("tr");
+        const band = d.entity.risk_band || "low";
+        tr.innerHTML = `<td><b>${d.entity_id}</b><br><span class="muted">${d.entity.name || ""}</span></td>
+          <td>${d.entity_type}</td>
+          <td><span class="pill b-${band}">${band}</span> ${d.risk_score ?? ""}</td>
+          <td>${(d.signals || []).join(", ")}</td>
+          <td class="muted">${(d.reasons || []).slice(0, 3).join("; ")}</td><td></td>`;
+        const act = tr.lastElementChild;
+        for (const [label, action, cls] of [["Approve", "approve", ""], ["Suspend", "suspend", "warn"], ["Reject", "reject", "mut"]]) {
+          const b = document.createElement("button"); b.textContent = label; b.className = cls;
+          b.onclick = () => transition(d.entity_type, d.entity_id, action);
+          act.append(b);
+        }
+        const view = document.createElement("button"); view.textContent = "View"; view.className = "ghost";
+        view.onclick = async () => { try { out(await api(`/api/admin/ops/entities/${d.entity_type}/${d.entity_id}`)); } catch (e) { out("Error: " + e.message); } };
+        act.append(view);
+        tb.append(tr);
+      }
+    }
+
+    async function transition(entity_type, entity_id, action) {
+      const reason = action === "approve" ? null : prompt(`Reason for ${action} ${entity_id}?`) || action;
+      try {
+        out(await api(`/api/admin/ops/entities/${entity_type}/${entity_id}/status`,
+          { method: "POST", body: JSON.stringify({ action, reason, decided_by: "ops-console" }) }));
+        await loadAll();
+      } catch (e) { out("Error: " + e.message); }
+    }
+  </script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 /* prisaMove service worker: offline-capable shell for low-connectivity regions. */
 const CACHE = "prisamove-v1";
-const SHELL = ["index.html", "marketplace.html", "tracking.html", "admin.html", "manifest.webmanifest"];
+const SHELL = ["index.html", "marketplace.html", "tracking.html", "admin.html", "ops.html", "manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

@@ -294,6 +294,7 @@ Loads carry a **mode** and an auto-derived **scope**:
 | **Multi-tenant isolation** | `X-Tenant-ID` header + `TENANT_ISOLATION=true` | **central** SQLAlchemy guard auto-stamps new rows and filters **all** ORM reads for every tenant model (cross-tenant access → 404) |
 | **Service-station onboarding** | `POST /api/service-centers/{id}/submit`, `/risk`, `/reputation`; `POST /api/admin/service-centers/{id}/status` | regulatory compliance + risk assessment + reputation, lifecycle `pending→under_review→approved/rejected/suspended`; self-inspection rings auto-route to review |
 | **Party onboarding (people & orgs)** | `POST /api/parties` + `/{id}/submit`, `/risk`; `POST /api/admin/role-requirements`, `POST /api/admin/parties/{id}/status`; drivers via `/api/drivers/{id}/submit` + `/api/admin/drivers/{id}/status` | one engine for **drivers, logistics operators, fleet managers, inspection agents, MSPs**: admin-configured per-region/role docs + experience + sanctions screening; risk + lifecycle + admin transitions |
+| **Ops console** | `GET /api/admin/ops/dashboard`, `/review-queue`, `/audit`, `/entities/{type}/{id}`; `POST /api/admin/ops/entities/{type}/{id}/status` | one **risk-ranked review queue + dashboard + audit** across all entity types, with a unified approve/suspend/reinstate/reject action; UI at `frontend/ops.html` |
 
 `KYC_ENDPOINT`/`SANCTIONS_ENDPOINT` plug real verification providers; without them
 documents stay unverified (operator/manual review). With `REDIS_URL` set, the SSE
@@ -459,7 +460,7 @@ agri_platform/
   marketplace/   models, pricing, negotiation, service, tax_service, calendar_service,
                  tracking, routing_client, compliance, compliance_service, loads_planning,
                  reputation, telematics, payments, insurance, demand, fleet, trust,
-                 resilience, kyc, tenants, service_centers, onboarding, app, wsgi, Dockerfile
+                 resilience, kyc, tenants, service_centers, onboarding, ops, app, wsgi, Dockerfile
 migrations/      Alembic envs for wfaas / traas / lgaas
 frontend/        index.html (GIS dashboard) + marketplace.html (prisaMove)
 tests/           pytest suite
