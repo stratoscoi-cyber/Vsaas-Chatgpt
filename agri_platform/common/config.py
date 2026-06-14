@@ -76,6 +76,8 @@ class Settings:
     haggle_ai_endpoint: Optional[str] = None
     # Optional webhook for shipment tracking notifications (delay/reroute/ETA)
     tracking_webhook_url: Optional[str] = None
+    # Enforce vehicle/driver onboarding compliance before allowing offers
+    compliance_enforced: bool = False
     # HTTP
     port: int = 5000
 
@@ -111,6 +113,7 @@ class Settings:
             drone_ai_endpoint=os.getenv("DRONE_AI_ENDPOINT"),
             haggle_ai_endpoint=os.getenv("HAGGLE_AI_ENDPOINT"),
             tracking_webhook_url=os.getenv("TRACKING_WEBHOOK_URL"),
+            compliance_enforced=_bool("COMPLIANCE_ENFORCED", False),
             port=_int("PORT", default_port),
         )
 

@@ -130,6 +130,8 @@ hazards (`POST/GET /api/hazards`, `DELETE /api/hazards/{id}`) ·
 | `/api/admin/holidays*` | **admin-only** public-holiday management (`X-Admin-Key`) |
 | `GET /api/regions/{code}/profile` | region cultural profile (currency, weekend, style, holidays) |
 | `/api/shipments/*` · `/api/tracking/reasons` | live shipment tracking, ETA, delays & reroutes |
+| `/api/drivers/*` · `/api/vehicles/*` · `/api/service-centers/*` · `/api/compliance/*` | onboarding & compliance |
+| `GET /api/loads/{ref}/match-vehicles` · `/api/consolidations*` | FTL matching & LTL consolidation |
 
 ```bash
 # Post a load, get a fair quote, bid, then ask the AI to haggle as the shipper
@@ -221,6 +223,59 @@ curl -s localhost:5003/api/offers/1/haggle -H 'content-type: application/json' \
   Sat–Sun elsewhere) and a default **negotiation-style** preset.
   `GET /api/regions/{code}/profile` returns the region, currency, weekend,
   negotiation profile and upcoming holidays.
+
+## prisaMove onboarding & compliance (anti-collusion)
+
+Carriers, vehicles and service centres pass an automated **pre-registration check**
+before they can transact. A deterministic rules engine (`compliance.py`) decides
+**approved / rejected / review** from operator-configured requirements and
+submitted evidence — humans only touch the genuinely suspicious cases.
+
+- **Per-region requirements** (`/api/admin/region-rules`, admin) — required driver
+  and vehicle documents, minimum driving experience (e.g. 2 years with proof),
+  minimum insured value, inspection interval, tracker/camera requirement.
+- **Approved agencies** (`/api/admin/agencies`, admin) — only documents issued by
+  recognised licensing/insurance/inspection bodies count.
+- **Evidence**: documents (DL, permits, registration, insurance with insured value
+  + coverage), and periodic physical/mechanical **inspections** recorded by a
+  service centre. A document only passes when present, issued by an approved
+  agency, unexpired and verified — nothing is assumed.
+- **IoT/camera**: a vehicle must have an approved, serviceable tracker and onboard
+  camera when the region requires them.
+- **Anti-collusion signals** downgrade an otherwise-approved entity to `review`:
+  self-inspection (vehicle inspected by a centre owned by the vehicle's owner),
+  re-used documents (shared `doc_hash`), abnormal inspection velocity, and owners
+  with repeated rejections. `POST /api/admin/compliance/decisions/{id}/override`
+  records an auditable human decision.
+- **Enforcement** (`COMPLIANCE_ENFORCED=true`): placing an offer requires an
+  approved vehicle **and** approved assigned driver.
+
+| Method & path | Purpose |
+|---------------|---------|
+| `POST /api/admin/agencies` · `POST /api/admin/region-rules` | configure approved issuers & per-region rules |
+| `POST /api/drivers` · `POST /api/vehicles` · `POST /api/service-centers` | register entities |
+| `POST /api/compliance/documents` | attach a document (auto-hashed for dedup) |
+| `POST /api/vehicles/{id}/inspection` | record a physical/mechanical inspection |
+| `POST /api/{drivers|vehicles|service-centers}/{id}/submit` | run the auto check |
+| `GET /api/compliance/decisions` | decisions with reasons, signals, risk score |
+| `POST /api/admin/compliance/decisions/{id}/override` | limited human intervention |
+
+## Load modes, scope, matching & consolidation
+
+Loads carry a **mode** and an auto-derived **scope**:
+
+- `ftl` (full truckload) — `GET /api/loads/{ref}/match-vehicles` ranks eligible
+  vehicles by type/tonnage (smallest sufficient capacity first), honouring
+  special-handling features (refrigeration, hazmat, livestock) and, when enforced,
+  compliance approval.
+- `ltl` (less-than-truckload) — candidates for consolidation.
+- `consolidation` — `GET /api/consolidations/suggest` groups open LTL loads by
+  origin/destination corridor (optionally capped by weight); `POST
+  /api/consolidations` aggregates chosen loads into one group.
+- **Scope** (`local` / `intra_region` / `inter_region`) is derived from the
+  origin/destination regions and distance at load creation.
+- **Optional cargo insurance** is selectable by the load owner at placement
+  (`insurance_opted`, `insurance_level`, `insurance_value`).
 
 ## prisaMove live shipment tracking
 
@@ -321,7 +376,9 @@ curl -s localhost:5003/api/tax/quote -H 'content-type: application/json' \
 | `DATABASE_URL` | `sqlite:///<service>.db` | all |
 | `REDIS_URL` | _unset → in-memory cache_ | wfaas, lgaas |
 | `AUTH_ENABLED` / `API_KEYS` | `false` / _empty_ | all |
-| `ADMIN_API_KEYS` | _empty → admin disabled_ | lgaas (tax admin) |
+| `ADMIN_API_KEYS` | _empty → admin disabled_ | lgaas (tax/compliance admin) |
+| `COMPLIANCE_ENFORCED` | `false` | lgaas (offers require approved vehicle+driver) |
+| `TRAAS_URL` | _unset_ | lgaas (reroute avoidance) |
 | `RATE_LIMIT_PER_MINUTE` | `0` (off) | all |
 | `VALHALLA_URL` | _unset → straight-line_ | traas |
 | `OPEN_METEO_URL` | Open-Meteo public API | wfaas |
@@ -351,7 +408,8 @@ agri_platform/
   wfaas/         models, service, notifications, monitoring, ai, app, wsgi, Dockerfile
   traas/         models, routing, service, app, wsgi, Dockerfile
   marketplace/   models, pricing, negotiation, service, tax_service, calendar_service,
-                 tracking, routing_client, app, wsgi, Dockerfile   (LGaaS / prisaMove)
+                 tracking, routing_client, compliance, compliance_service,
+                 loads_planning, app, wsgi, Dockerfile   (LGaaS / prisaMove)
 migrations/      Alembic envs for wfaas / traas / lgaas
 frontend/        index.html (GIS dashboard) + marketplace.html (prisaMove)
 tests/           pytest suite

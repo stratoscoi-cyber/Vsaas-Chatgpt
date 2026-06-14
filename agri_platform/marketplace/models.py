@@ -32,6 +32,16 @@ class Load(Base):
     budget = Column(Float)               # optional target price
     currency = Column(String(8), default="USD")
     distance_km = Column(Float)          # optional precomputed; else derived
+    # Load mode and geographic scope (see loads_planning).
+    load_mode = Column(String(16), default="ftl")   # ftl | ltl | consolidation
+    scope = Column(String(16))                       # local | intra_region | inter_region
+    origin_region = Column(String(8))
+    destination_region = Column(String(8))
+    consolidation_id = Column(String(50), index=True)
+    # Optional cargo insurance selected by the load owner at placement.
+    insurance_opted = Column(Boolean, default=False)
+    insurance_level = Column(String(16))             # basic | premium
+    insurance_value = Column(Float)
     status = Column(String(20), default="open")  # open|negotiating|awarded|in_transit|delivered|cancelled
     awarded_offer_id = Column(Integer)
     notes = Column(String(500))
@@ -54,6 +64,14 @@ class Load(Base):
             "budget": self.budget,
             "currency": self.currency,
             "distance_km": self.distance_km,
+            "load_mode": self.load_mode,
+            "scope": self.scope,
+            "origin_region": self.origin_region,
+            "destination_region": self.destination_region,
+            "consolidation_id": self.consolidation_id,
+            "insurance_opted": self.insurance_opted,
+            "insurance_level": self.insurance_level,
+            "insurance_value": self.insurance_value,
             "status": self.status,
             "awarded_offer_id": self.awarded_offer_id,
             "notes": self.notes,
@@ -76,6 +94,16 @@ class Vehicle(Base):
     base_rate_per_km = Column(Float)
     location = Column(JSON)
     available = Column(String(10), default="true")
+    region_code = Column(String(8), index=True)
+    driver_id = Column(String(50), index=True)
+    # Onboarding / compliance state.
+    compliance_status = Column(String(16))  # None|pending|approved|rejected|review|suspended
+    tracker_serial = Column(String(60))
+    tracker_model = Column(String(60))
+    tracker_approved = Column(Boolean, default=False)
+    tracker_serviceable = Column(Boolean, default=False)
+    camera_serial = Column(String(60))
+    inspection_valid_until = Column(String(10))  # ISO date
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self):
@@ -89,6 +117,15 @@ class Vehicle(Base):
             "base_rate_per_km": self.base_rate_per_km,
             "location": self.location,
             "available": self.available,
+            "region_code": self.region_code,
+            "driver_id": self.driver_id,
+            "compliance_status": self.compliance_status,
+            "tracker_serial": self.tracker_serial,
+            "tracker_model": self.tracker_model,
+            "tracker_approved": self.tracker_approved,
+            "tracker_serviceable": self.tracker_serviceable,
+            "camera_serial": self.camera_serial,
+            "inspection_valid_until": self.inspection_valid_until,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -411,3 +448,191 @@ class NegotiationMessage(Base):
             "negotiation_style": self.negotiation_style,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+# --- onboarding / compliance ---------------------------------------------------
+
+class ApprovedAgency(Base):
+    """An issuer the operator recognises (licensing, insurance, inspection, permit)."""
+
+    __tablename__ = "approved_agencies"
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String(50), unique=True, nullable=False, index=True)
+    name = Column(String(160))
+    agency_type = Column(String(20))  # licensing|insurance|inspection|permit
+    region_code = Column(String(8), index=True)  # ISO-2 or "*" for all
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"code": self.code, "name": self.name, "agency_type": self.agency_type,
+                "region_code": self.region_code, "active": self.active}
+
+
+class RegionComplianceRule(Base):
+    """Per-region onboarding requirements (operator-managed; ships with none)."""
+
+    __tablename__ = "region_compliance_rules"
+
+    id = Column(Integer, primary_key=True)
+    region_code = Column(String(8), unique=True, nullable=False, index=True)
+    required_driver_docs = Column(JSON, default=list)   # e.g. ["drivers_license","permit","experience_proof"]
+    required_vehicle_docs = Column(JSON, default=list)  # e.g. ["registration","insurance","roadworthiness"]
+    min_experience_years = Column(Float, default=2.0)
+    min_insured_value = Column(Float, default=0.0)
+    inspection_interval_days = Column(Integer, default=180)
+    require_tracker = Column(Boolean, default=True)
+    require_onboard_camera = Column(Boolean, default=True)
+    active = Column(Boolean, default=True)
+
+    def to_dict(self):
+        return {
+            "region_code": self.region_code,
+            "required_driver_docs": self.required_driver_docs or [],
+            "required_vehicle_docs": self.required_vehicle_docs or [],
+            "min_experience_years": self.min_experience_years,
+            "min_insured_value": self.min_insured_value,
+            "inspection_interval_days": self.inspection_interval_days,
+            "require_tracker": self.require_tracker,
+            "require_onboard_camera": self.require_onboard_camera,
+            "active": self.active,
+        }
+
+    def to_rule(self):
+        return self.to_dict()
+
+
+class Driver(Base):
+    __tablename__ = "drivers"
+
+    id = Column(Integer, primary_key=True)
+    driver_id = Column(String(50), unique=True, nullable=False, index=True)
+    name = Column(String(120))
+    owner_id = Column(String(50), index=True)
+    region_code = Column(String(8))
+    experience_years = Column(Float, default=0.0)
+    compliance_status = Column(String(16), default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"driver_id": self.driver_id, "name": self.name, "owner_id": self.owner_id,
+                "region_code": self.region_code, "experience_years": self.experience_years,
+                "compliance_status": self.compliance_status,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+class ServiceCenter(Base):
+    __tablename__ = "service_centers"
+
+    id = Column(Integer, primary_key=True)
+    center_id = Column(String(50), unique=True, nullable=False, index=True)
+    name = Column(String(160))
+    owner_id = Column(String(50), index=True)
+    region_code = Column(String(8))
+    compliance_status = Column(String(16), default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"center_id": self.center_id, "name": self.name, "owner_id": self.owner_id,
+                "region_code": self.region_code, "compliance_status": self.compliance_status,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+class ComplianceDocument(Base):
+    """A submitted document for a driver/vehicle/service-center."""
+
+    __tablename__ = "compliance_documents"
+
+    id = Column(Integer, primary_key=True)
+    entity_type = Column(String(20), index=True)  # driver|vehicle|service_center
+    entity_id = Column(String(50), index=True)
+    doc_type = Column(String(40))                 # drivers_license|permit|insurance|registration|...
+    reference = Column(String(120))               # document number
+    issuer_code = Column(String(50))              # FK -> approved_agencies.code
+    issued_on = Column(String(10))
+    expiry_on = Column(String(10))
+    insured_value = Column(Float)                 # for insurance docs
+    coverage = Column(JSON, default=list)         # e.g. ["vehicular","load","third_party"]
+    doc_hash = Column(String(80), index=True)     # to detect re-used documents
+    verified = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "entity_type": self.entity_type, "entity_id": self.entity_id,
+            "doc_type": self.doc_type, "reference": self.reference, "issuer_code": self.issuer_code,
+            "issued_on": self.issued_on, "expiry_on": self.expiry_on, "insured_value": self.insured_value,
+            "coverage": self.coverage or [], "doc_hash": self.doc_hash, "verified": self.verified,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def to_doc(self):
+        return self.to_dict()
+
+
+class Inspection(Base):
+    __tablename__ = "inspections"
+
+    id = Column(Integer, primary_key=True)
+    vehicle_id = Column(String(50), index=True)
+    center_id = Column(String(50))
+    performed_on = Column(String(10))
+    result = Column(String(10))      # pass|fail
+    valid_until = Column(String(10))
+    report_ref = Column(String(120))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"id": self.id, "vehicle_id": self.vehicle_id, "center_id": self.center_id,
+                "performed_on": self.performed_on, "result": self.result,
+                "valid_until": self.valid_until, "report_ref": self.report_ref,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+class ComplianceDecision(Base):
+    """An auto/human onboarding decision with its reasons and risk signals."""
+
+    __tablename__ = "compliance_decisions"
+
+    id = Column(Integer, primary_key=True)
+    entity_type = Column(String(20), index=True)
+    entity_id = Column(String(50), index=True)
+    decision = Column(String(16))    # approved|rejected|review
+    reasons = Column(JSON, default=list)
+    warnings = Column(JSON, default=list)
+    signals = Column(JSON, default=list)
+    risk_score = Column(Float, default=0.0)
+    auto = Column(Boolean, default=True)
+    decided_by = Column(String(50))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "entity_type": self.entity_type, "entity_id": self.entity_id,
+            "decision": self.decision, "reasons": self.reasons or [], "warnings": self.warnings or [],
+            "signals": self.signals or [], "risk_score": self.risk_score, "auto": self.auto,
+            "decided_by": self.decided_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class Consolidation(Base):
+    """An aggregation of LTL loads sharing an origin and destination area."""
+
+    __tablename__ = "consolidations"
+
+    id = Column(Integer, primary_key=True)
+    consolidation_id = Column(String(50), unique=True, nullable=False, index=True)
+    origin_region = Column(String(8))
+    destination_region = Column(String(8))
+    load_refs = Column(JSON, default=list)
+    total_weight_kg = Column(Float)
+    status = Column(String(20), default="open")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"consolidation_id": self.consolidation_id, "origin_region": self.origin_region,
+                "destination_region": self.destination_region, "load_refs": self.load_refs or [],
+                "total_weight_kg": self.total_weight_kg, "status": self.status,
+                "created_at": self.created_at.isoformat() if self.created_at else None}

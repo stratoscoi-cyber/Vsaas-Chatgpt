@@ -27,13 +27,20 @@ from ..common.security import install_admin_auth, install_auth
 from ..common import currency as currency_mod
 from ..common import regions
 from ..common import tax as tax_engine
+import hashlib
+
 from ..common.eventbus import EventBus
 from ..common.holiday_provider import make_holiday_provider
-from . import calendar_service, negotiation, service, tax_service, tracking
+from . import (
+    calendar_service, compliance_service, loads_planning, negotiation, service,
+    tax_service, tracking,
+)
 from .routing_client import make_traas_client
 from .models import (
-    Base, DelayReason, Holiday, Load, NegotiationMessage, Offer, Shipment,
-    ShipmentEvent, TaxRule, TrackPoint, Vehicle,
+    ApprovedAgency, Base, ComplianceDecision, ComplianceDocument, Consolidation,
+    DelayReason, Driver, Holiday, Inspection, Load, NegotiationMessage, Offer,
+    RegionComplianceRule, ServiceCenter, Shipment, ShipmentEvent, TaxRule,
+    TrackPoint, Vehicle,
 )
 
 SERVICE_NAME = "lgaas"
@@ -71,6 +78,7 @@ def create_app(
     app.config["EVENT_BUS"] = bus
     base_notifier = tracking_notifier or tracking.make_tracking_notifier(settings)
     app.config["TRACKING_NOTIFIER"] = tracking.CompositeNotifier([tracking.BusTrackingNotifier(bus), base_notifier])
+    app.config["COMPLIANCE_ENFORCED"] = settings.compliance_enforced
 
     install_request_logging(app, SERVICE_NAME)
     install_auth(app, settings.api_keys, settings.auth_enabled)
@@ -153,9 +161,21 @@ def create_app(
             budget=data.get("budget"),
             currency=currency,
             distance_km=data.get("distance_km"),
+            load_mode=data.get("load_mode", "ftl"),
+            insurance_opted=bool(data.get("insurance_opted", False)),
+            insurance_level=data.get("insurance_level"),
+            insurance_value=data.get("insurance_value"),
             notes=data.get("notes"),
             status="open",
         )
+        if load.load_mode not in ("ftl", "ltl", "consolidation"):
+            raise ApiError("load_mode must be ftl, ltl or consolidation", status_code=422, code="validation_error")
+        # Derive regions, distance and scope.
+        plan = loads_planning.classify_load(load)
+        load.origin_region = plan["origin_region"]
+        load.destination_region = plan["destination_region"]
+        load.distance_km = load.distance_km if load.distance_km is not None else plan["distance_km"]
+        load.scope = plan["scope"]
         session = db()
         if session.query(Load).filter_by(ref=load.ref).first():
             raise ApiError("load ref already exists", status_code=409, code="conflict")
@@ -280,6 +300,14 @@ def create_app(
             base_rate_per_km=data.get("base_rate_per_km"),
             location=data.get("location"),
             available=str(data.get("available", "true")).lower(),
+            region_code=data.get("region_code"),
+            driver_id=data.get("driver_id"),
+            tracker_serial=data.get("tracker_serial"),
+            tracker_model=data.get("tracker_model"),
+            tracker_approved=bool(data.get("tracker_approved", False)),
+            tracker_serviceable=bool(data.get("tracker_serviceable", False)),
+            camera_serial=data.get("camera_serial"),
+            compliance_status="pending",
         )
         session.add(vehicle)
         session.commit()
@@ -302,6 +330,11 @@ def create_app(
         require(data, "bidder_id", "bidder_role", "price")
         session = db()
         load = _load_or_404(session, ref)
+        if app.config["COMPLIANCE_ENFORCED"]:
+            blocking = compliance_service.offer_eligibility(session, data.get("vehicle_id"))
+            if blocking:
+                raise ApiError("vehicle/driver not eligible", status_code=422,
+                               code="compliance_blocked", details={"reasons": blocking})
         try:
             offer = service.place_offer(
                 session, load,
@@ -780,6 +813,199 @@ def create_app(
                 "date": calendar_service.add_business_days(db(), region_code, d, n, provider=provider).isoformat(),
             }
         return jsonify(info)
+
+    # --- compliance config (admin) ---------------------------------------------
+    @app.post("/api/admin/agencies")
+    def add_agency():
+        data = get_json()
+        require(data, "code", "name", "agency_type")
+        if data["agency_type"] not in ("licensing", "insurance", "inspection", "permit"):
+            raise ApiError("invalid agency_type", status_code=422, code="validation_error")
+        session = db()
+        if session.query(ApprovedAgency).filter_by(code=data["code"]).first():
+            raise ApiError("agency code already exists", status_code=409, code="conflict")
+        agency = ApprovedAgency(code=data["code"], name=data["name"], agency_type=data["agency_type"],
+                                region_code=data.get("region_code", "*"), active=bool(data.get("active", True)))
+        session.add(agency)
+        session.commit()
+        return jsonify(agency.to_dict()), 201
+
+    @app.get("/api/admin/agencies")
+    def list_agencies():
+        q = db().query(ApprovedAgency).order_by(ApprovedAgency.code)
+        if request.args.get("region_code"):
+            q = q.filter_by(region_code=request.args["region_code"])
+        return jsonify(agencies=[a.to_dict() for a in q.all()])
+
+    @app.post("/api/admin/region-rules")
+    def upsert_region_rule():
+        data = get_json()
+        require(data, "region_code")
+        session = db()
+        rule = session.query(RegionComplianceRule).filter_by(region_code=data["region_code"]).first()
+        if rule is None:
+            rule = RegionComplianceRule(region_code=data["region_code"])
+            session.add(rule)
+        for f in ("required_driver_docs", "required_vehicle_docs", "min_experience_years",
+                  "min_insured_value", "inspection_interval_days", "require_tracker",
+                  "require_onboard_camera", "active"):
+            if f in data:
+                setattr(rule, f, data[f])
+        session.commit()
+        return jsonify(rule.to_dict())
+
+    @app.get("/api/admin/region-rules")
+    def list_region_rules():
+        return jsonify(region_rules=[r.to_dict() for r in db().query(RegionComplianceRule).all()])
+
+    # --- onboarding entities ---------------------------------------------------
+    @app.post("/api/drivers")
+    def register_driver():
+        data = get_json()
+        require(data, "driver_id")
+        session = db()
+        if session.query(Driver).filter_by(driver_id=data["driver_id"]).first():
+            raise ApiError("driver already exists", status_code=409, code="conflict")
+        driver = Driver(driver_id=data["driver_id"], name=data.get("name"), owner_id=data.get("owner_id"),
+                        region_code=data.get("region_code"),
+                        experience_years=float(data.get("experience_years", 0) or 0),
+                        compliance_status="pending")
+        session.add(driver)
+        session.commit()
+        return jsonify(driver.to_dict()), 201
+
+    @app.post("/api/service-centers")
+    def register_center():
+        data = get_json()
+        require(data, "center_id")
+        session = db()
+        if session.query(ServiceCenter).filter_by(center_id=data["center_id"]).first():
+            raise ApiError("service center already exists", status_code=409, code="conflict")
+        center = ServiceCenter(center_id=data["center_id"], name=data.get("name"),
+                               owner_id=data.get("owner_id"), region_code=data.get("region_code"),
+                               compliance_status="pending")
+        session.add(center)
+        session.commit()
+        return jsonify(center.to_dict()), 201
+
+    @app.post("/api/compliance/documents")
+    def add_document():
+        data = get_json()
+        require(data, "entity_type", "entity_id", "doc_type")
+        if data["entity_type"] not in ("driver", "vehicle", "service_center"):
+            raise ApiError("invalid entity_type", status_code=422, code="validation_error")
+        doc_hash = data.get("doc_hash")
+        if not doc_hash and data.get("reference"):
+            doc_hash = hashlib.sha256(str(data["reference"]).encode()).hexdigest()[:32]
+        doc = ComplianceDocument(
+            entity_type=data["entity_type"], entity_id=data["entity_id"], doc_type=data["doc_type"],
+            reference=data.get("reference"), issuer_code=data.get("issuer_code"),
+            issued_on=data.get("issued_on"), expiry_on=data.get("expiry_on"),
+            insured_value=data.get("insured_value"), coverage=data.get("coverage", []),
+            doc_hash=doc_hash, verified=bool(data.get("verified", False)))
+        session = db()
+        session.add(doc)
+        session.commit()
+        return jsonify(doc.to_dict()), 201
+
+    @app.post("/api/vehicles/<vid>/inspection")
+    def add_inspection(vid):
+        data = get_json()
+        require(data, "center_id", "result")
+        if data["result"] not in ("pass", "fail"):
+            raise ApiError("result must be pass or fail", status_code=422, code="validation_error")
+        session = db()
+        if session.query(Vehicle).filter_by(vehicle_id=vid).first() is None:
+            raise ApiError("vehicle not found", status_code=404, code="not_found")
+        insp = Inspection(vehicle_id=vid, center_id=data["center_id"],
+                          performed_on=data.get("performed_on", _today_date().isoformat()),
+                          result=data["result"], valid_until=data.get("valid_until"),
+                          report_ref=data.get("report_ref"))
+        session.add(insp)
+        session.commit()
+        return jsonify(insp.to_dict()), 201
+
+    # --- compliance evaluation -------------------------------------------------
+    @app.post("/api/drivers/<did>/submit")
+    def submit_driver(did):
+        session = db()
+        driver = session.query(Driver).filter_by(driver_id=did).first()
+        if driver is None:
+            raise ApiError("driver not found", status_code=404, code="not_found")
+        return jsonify(compliance_service.evaluate_driver(session, driver).to_dict())
+
+    @app.post("/api/vehicles/<vid>/submit")
+    def submit_vehicle(vid):
+        session = db()
+        vehicle = session.query(Vehicle).filter_by(vehicle_id=vid).first()
+        if vehicle is None:
+            raise ApiError("vehicle not found", status_code=404, code="not_found")
+        return jsonify(compliance_service.evaluate_vehicle(session, vehicle).to_dict())
+
+    @app.post("/api/service-centers/<cid>/submit")
+    def submit_center(cid):
+        session = db()
+        center = session.query(ServiceCenter).filter_by(center_id=cid).first()
+        if center is None:
+            raise ApiError("service center not found", status_code=404, code="not_found")
+        return jsonify(compliance_service.evaluate_service_center(session, center).to_dict())
+
+    @app.get("/api/compliance/decisions")
+    def list_decisions():
+        q = db().query(ComplianceDecision).order_by(ComplianceDecision.id.desc())
+        for f in ("entity_type", "entity_id", "decision"):
+            if request.args.get(f):
+                q = q.filter_by(**{f: request.args[f]})
+        page, size = page_params()
+        items, meta = paginate(q, page, size)
+        return jsonify(decisions=[d.to_dict() for d in items], pagination=meta)
+
+    @app.post("/api/admin/compliance/decisions/<int:decision_id>/override")
+    def override_decision(decision_id):
+        data = get_json()
+        require(data, "decision", "decided_by")
+        if data["decision"] not in ("approved", "rejected", "review"):
+            raise ApiError("invalid decision", status_code=422, code="validation_error")
+        try:
+            row = compliance_service.override(db(), decision_id, data["decision"],
+                                              data["decided_by"], data.get("note"))
+        except LookupError as exc:
+            raise ApiError(str(exc), status_code=404, code="not_found")
+        return jsonify(row.to_dict())
+
+    # --- load planning: matching & consolidation -------------------------------
+    @app.get("/api/loads/<ref>/match-vehicles")
+    def match_vehicles(ref):
+        session = db()
+        load = _load_or_404(session, ref)
+        require_approved = app.config["COMPLIANCE_ENFORCED"] or request.args.get("approved") == "true"
+        return jsonify(load_ref=ref, load_mode=load.load_mode, scope=load.scope,
+                       matches=loads_planning.matchable_vehicles(session, load, require_approved=require_approved))
+
+    @app.get("/api/consolidations/suggest")
+    def suggest_consolidations():
+        max_w = request.args.get("max_group_weight_kg")
+        groups = loads_planning.suggest_consolidations(
+            db(), region_code=request.args.get("region"),
+            max_group_weight_kg=float(max_w) if max_w else None)
+        return jsonify(groups=groups)
+
+    @app.post("/api/consolidations")
+    def create_consolidation():
+        data = get_json()
+        require(data, "load_refs")
+        try:
+            con = loads_planning.create_consolidation(db(), data["load_refs"])
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(con.to_dict()), 201
+
+    @app.get("/api/consolidations")
+    def list_consolidations():
+        q = db().query(Consolidation).order_by(Consolidation.id.desc())
+        page, size = page_params()
+        items, meta = paginate(q, page, size)
+        return jsonify(consolidations=[c.to_dict() for c in items], pagination=meta)
 
     return app
 
