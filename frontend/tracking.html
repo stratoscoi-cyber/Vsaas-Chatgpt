@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>prisaMove — Live Tracking</title>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; }
+    #map { position: absolute; inset: 0 0 0 360px; }
+    #panel { position: absolute; top: 0; left: 0; bottom: 0; width: 360px; overflow-y: auto;
+             padding: 14px; background: #11161d; color: #e8edf2; }
+    h1 { font-size: 17px; margin: 0; color: #46b06a; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #8aa0b4; margin: 16px 0 8px; }
+    a { color: #8aa0b4; font-size: 12px; }
+    label { display: block; font-size: 12px; margin: 8px 0 3px; color: #aebfce; }
+    input, select { width: 100%; padding: 7px 8px; border-radius: 6px; border: 1px solid #2a3645; background: #0c1117; color: #e8edf2; font-size: 13px; }
+    .row { display: flex; gap: 6px; } .row > * { flex: 1; }
+    button { margin-top: 8px; padding: 8px; border: 0; border-radius: 6px; background: #2f7d4f; color: #fff; font-size: 13px; cursor: pointer; }
+    button.alt { background: #b4471f; } button.ghost { background: #243140; }
+    .stat { background: #0c1117; border: 1px solid #2a3645; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; font-size: 13px; }
+    .stat b { color: #46b06a; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:10px; background:#243140; font-size:11px; }
+    .feed { font-size: 12px; }
+    .feed div { border-bottom: 1px solid #2a3645; padding: 6px 0; color: #cdd9e5; }
+    .muted { color: #6f8295; }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <h1>prisaMove · Live Tracking</h1>
+    <a href="marketplace.html">← Marketplace</a>
+    <h2>Shipment</h2>
+    <label>LGaaS base URL</label><input id="base" value="http://localhost:5003" />
+    <label>Shipment ID</label><input id="sid" placeholder="shp_..." />
+    <button id="load">Track</button>
+
+    <div id="stats"></div>
+
+    <h2>Driver / operator</h2>
+    <p class="muted" style="font-size:11px;">Click the map to set a position, then send a ping.</p>
+    <div class="row">
+      <div><label>Lat</label><input id="plat" /></div>
+      <div><label>Lon</label><input id="plon" /></div>
+      <div><label>Speed</label><input id="pspeed" value="55" /></div>
+    </div>
+    <button id="ping">Send location</button>
+    <div class="row">
+      <button class="ghost" data-status="picked_up">Picked up</button>
+      <button class="ghost" data-status="arrived">Arrived</button>
+      <button class="ghost" data-status="delivered">Delivered</button>
+    </div>
+
+    <h2>Report delay</h2>
+    <div class="row">
+      <div><label>Minutes</label><input id="dmin" value="30" /></div>
+      <div><label>Reason</label><select id="dreason"></select></div>
+    </div>
+    <button id="delay" class="alt">Report delay</button>
+
+    <h2>Reroute</h2>
+    <label>Reason</label><select id="rreason"></select>
+    <p class="muted" style="font-size:11px;">Optionally click the map to set a new destination.</p>
+    <button id="reroute" class="alt">Reroute</button>
+
+    <h2>Timeline</h2>
+    <div id="feed" class="feed"></div>
+  </div>
+  <div id="map"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const base = () => $("base").value.replace(/\/$/, "");
+    let pollTimer = null, newDest = null;
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: { version: 8, sources: { osm: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256, attribution: "© OpenStreetMap" } },
+               layers: [{ id: "osm", type: "raster", source: "osm" }] },
+      center: [8, 9], zoom: 6,
+    });
+    const markers = {};
+
+    map.on("load", () => {
+      map.addSource("trail", { type: "geojson", data: line([]) });
+      map.addLayer({ id: "trail", type: "line", source: "trail", paint: { "line-color": "#2f7d4f", "line-width": 4 } });
+      loadReasons();
+    });
+    map.on("click", (e) => {
+      $("plat").value = e.lngLat.lat.toFixed(5); $("plon").value = e.lngLat.lng.toFixed(5);
+      newDest = { lat: e.lngLat.lat, lon: e.lngLat.lng };
+    });
+
+    function line(coords) { return { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "LineString", coordinates: coords }, properties: {} }] }; }
+    async function api(path, opts) {
+      const r = await fetch(base() + path, opts);
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((b.error && b.error.message) || ("HTTP " + r.status));
+      return b;
+    }
+    const jpost = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const sid = () => $("sid").value.trim();
+
+    function setMarker(key, lon, lat, color) {
+      if (!markers[key]) markers[key] = new maplibregl.Marker({ color }).setLngLat([lon, lat]).addTo(map);
+      else markers[key].setLngLat([lon, lat]);
+    }
+
+    async function loadReasons() {
+      try {
+        const all = await api("/api/tracking/reasons");
+        const byCat = (c) => all.reasons.filter((r) => r.category === c).map((r) => `<option value="${r.code}">${r.label}</option>`).join("");
+        $("dreason").innerHTML = byCat("delay");
+        $("rreason").innerHTML = byCat("reroute");
+      } catch (_) {}
+    }
+
+    async function refresh() {
+      try {
+        const s = await api(`/api/shipments/${sid()}`);
+        const track = (await api(`/api/shipments/${sid()}/track`)).track;
+        const events = (await api(`/api/shipments/${sid()}/events`)).events;
+        render(s, track, events);
+      } catch (e) { $("stats").innerHTML = `<div class="stat">Error: ${e.message}</div>`; }
+    }
+
+    function render(s, track, events) {
+      const eta = s.eta ? new Date(s.eta).toLocaleString() : "—";
+      $("stats").innerHTML = `
+        <div class="stat">Status <span class="pill">${s.status}</span></div>
+        <div class="stat"><b>ETA</b> ${eta}</div>
+        <div class="stat">Delay: ${s.delay_minutes || 0} min · Planned: ${s.planned_distance_km ?? "—"} km</div>
+        <div class="stat muted">${s.shipment_id} · ${s.carrier_id || ""} ${s.driver_name ? "· " + s.driver_name : ""}</div>`;
+      if (s.origin) setMarker("origin", s.origin.lon, s.origin.lat, "#2f7d4f");
+      if (s.destination) setMarker("dest", s.destination.lon, s.destination.lat, "#b4471f");
+      if (s.current_location) {
+        setMarker("cur", s.current_location.lon, s.current_location.lat, "#2563eb");
+        map.easeTo({ center: [s.current_location.lon, s.current_location.lat], duration: 500 });
+      }
+      const coords = track.map((p) => [p.lon, p.lat]);
+      if (map.getSource("trail")) map.getSource("trail").setData(line(coords));
+      $("feed").innerHTML = events.slice().reverse().map((e) =>
+        `<div><b>${e.event_type}</b> ${e.reason_label ? "· " + e.reason_label : ""} ${e.message ? "— " + e.message : ""}
+         <div class="muted">${new Date(e.created_at).toLocaleTimeString()}${e.eta ? " · ETA " + new Date(e.eta).toLocaleTimeString() : ""}</div></div>`).join("");
+    }
+
+    $("load").onclick = () => {
+      if (pollTimer) clearInterval(pollTimer);
+      refresh();
+      pollTimer = setInterval(refresh, 4000);  // live polling
+    };
+    $("ping").onclick = async () => {
+      try { await api(`/api/shipments/${sid()}/location`, jpost({ lat: parseFloat($("plat").value), lon: parseFloat($("plon").value), speed_kmh: parseFloat($("pspeed").value), source: "driver" })); refresh(); }
+      catch (e) { alert(e.message); }
+    };
+    document.querySelectorAll("[data-status]").forEach((b) => b.onclick = async () => {
+      try { await api(`/api/shipments/${sid()}/status`, jpost({ status: b.dataset.status })); refresh(); } catch (e) { alert(e.message); }
+    });
+    $("delay").onclick = async () => {
+      try { await api(`/api/shipments/${sid()}/delay`, jpost({ delay_minutes: parseFloat($("dmin").value), reason_code: $("dreason").value })); refresh(); }
+      catch (e) { alert(e.message); }
+    };
+    $("reroute").onclick = async () => {
+      const body = { reason_code: $("rreason").value };
+      if (newDest) body.new_destination = newDest;
+      try { await api(`/api/shipments/${sid()}/reroute`, jpost(body)); newDest = null; refresh(); } catch (e) { alert(e.message); }
+    };
+  </script>
+</body>
+</html>

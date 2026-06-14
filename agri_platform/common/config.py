@@ -51,6 +51,9 @@ class Settings:
     # Localization (Africa-centric defaults)
     default_language: str = "en"
     default_region: str = "NG"
+    # Public-holiday source: "admin" (table only) or "library" (maintained
+    # python-holidays calendars layered under the admin table).
+    holiday_provider: str = "admin"
     # Observability
     log_level: str = "INFO"
     log_json: bool = True
@@ -69,6 +72,8 @@ class Settings:
     drone_ai_endpoint: Optional[str] = None
     # LGaaS / prisaMove haggling message composer endpoint (optional LLM service)
     haggle_ai_endpoint: Optional[str] = None
+    # Optional webhook for shipment tracking notifications (delay/reroute/ETA)
+    tracking_webhook_url: Optional[str] = None
     # HTTP
     port: int = 5000
 
@@ -88,6 +93,7 @@ class Settings:
             valhalla_url=os.getenv("VALHALLA_URL"),
             default_language=os.getenv("DEFAULT_LANGUAGE", "en"),
             default_region=os.getenv("DEFAULT_REGION", "NG"),
+            holiday_provider=os.getenv("HOLIDAY_PROVIDER", "admin"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_json=_bool("LOG_JSON", True),
             notifications_enabled=_bool("NOTIFICATIONS_ENABLED", False),
@@ -101,6 +107,7 @@ class Settings:
             monitor_interval_minutes=_int("MONITOR_INTERVAL_MINUTES", 30),
             drone_ai_endpoint=os.getenv("DRONE_AI_ENDPOINT"),
             haggle_ai_endpoint=os.getenv("HAGGLE_AI_ENDPOINT"),
+            tracking_webhook_url=os.getenv("TRACKING_WEBHOOK_URL"),
             port=_int("PORT", default_port),
         )
 

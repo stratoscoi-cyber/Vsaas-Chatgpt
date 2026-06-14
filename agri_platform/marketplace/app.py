@@ -25,8 +25,12 @@ from ..common.security import install_admin_auth, install_auth
 from ..common import currency as currency_mod
 from ..common import regions
 from ..common import tax as tax_engine
-from . import calendar_service, negotiation, service, tax_service
-from .models import Base, Holiday, Load, NegotiationMessage, Offer, TaxRule, Vehicle
+from ..common.holiday_provider import make_holiday_provider
+from . import calendar_service, negotiation, service, tax_service, tracking
+from .models import (
+    Base, DelayReason, Holiday, Load, NegotiationMessage, Offer, Shipment,
+    ShipmentEvent, TaxRule, TrackPoint, Vehicle,
+)
 
 SERVICE_NAME = "lgaas"
 BRAND = "prisaMove"
@@ -40,6 +44,8 @@ def create_app(
     settings: Optional[Settings] = None,
     session_factory=None,
     composer: Optional[negotiation.MessageComposer] = None,
+    holiday_provider=None,
+    tracking_notifier=None,
 ) -> Flask:
     settings = settings or Settings.from_env(SERVICE_NAME, default_port=5003)
     configure_logging(settings.log_level, settings.log_json)
@@ -52,6 +58,8 @@ def create_app(
         db_helpers.init_models(engine, Base)
     app.config["SESSION_FACTORY"] = session_factory
     app.config["COMPOSER"] = composer or negotiation.make_composer(settings.haggle_ai_endpoint)
+    app.config["HOLIDAY_PROVIDER"] = holiday_provider or make_holiday_provider(settings.holiday_provider)
+    app.config["TRACKING_NOTIFIER"] = tracking_notifier or tracking.make_tracking_notifier(settings)
 
     install_request_logging(app, SERVICE_NAME)
     install_auth(app, settings.api_keys, settings.auth_enabled)
@@ -148,7 +156,8 @@ def create_app(
         deadline = _parse_iso_date(load.delivery_deadline) if load.delivery_deadline else None
         if deadline is not None:
             body["schedule"] = calendar_service.schedule_info(
-                session, region.code if region else app.config["DEFAULT_REGION_CODE"], deadline)
+                session, region.code if region else app.config["DEFAULT_REGION_CODE"], deadline,
+                provider=app.config["HOLIDAY_PROVIDER"])
         return jsonify(body), 201
 
     @app.get("/api/loads")
@@ -334,6 +343,7 @@ def create_app(
 
     @app.post("/api/offers/<int:offer_id>/accept")
     def accept(offer_id):
+        data = get_json()
         session = db()
         offer = _offer_or_404(session, offer_id)
         load = _load_or_404(session, offer.load_ref)
@@ -341,7 +351,18 @@ def create_app(
             offer = service.accept_offer(session, load, offer)
         except ValueError as exc:
             raise ApiError(str(exc), status_code=409, code="conflict")
-        return jsonify(offer=offer.to_dict(), load=load.to_dict())
+        # Awarding a load opens a live, trackable shipment.
+        shipment = None
+        if load.origin and load.destination:
+            shipment = tracking.create_shipment(
+                session, load, offer,
+                driver_name=data.get("driver_name"),
+                driver_phone=data.get("driver_phone"),
+                avg_speed_kmh=data.get("avg_speed_kmh"),
+                notifier=app.config["TRACKING_NOTIFIER"],
+            )
+        return jsonify(offer=offer.to_dict(), load=load.to_dict(),
+                       shipment=shipment.to_dict() if shipment else None)
 
     @app.post("/api/offers/<int:offer_id>/reject")
     def reject(offer_id):
@@ -522,7 +543,8 @@ def create_app(
             default_negotiation_style=region.default_negotiation_style,
             negotiation_profile=negotiation.get_profile(region.default_negotiation_style).to_dict(),
             weekend=list(region.weekend),
-            upcoming_holidays=calendar_service.upcoming(db(), code, _date.today()),
+            upcoming_holidays=calendar_service.upcoming(db(), code, _date.today(),
+                                                        provider=app.config["HOLIDAY_PROVIDER"]),
         )
 
     # --- public holidays (admin) ----------------------------------------------
@@ -586,6 +608,115 @@ def create_app(
         session.commit()
         return jsonify(holiday.to_dict())
 
+    # --- shipment tracking -----------------------------------------------------
+    def _shipment_or_404(session, sid) -> Shipment:
+        shipment = session.query(Shipment).filter_by(shipment_id=sid).first()
+        if shipment is None:
+            raise ApiError("shipment not found", status_code=404, code="not_found")
+        return shipment
+
+    @app.get("/api/shipments")
+    def list_shipments():
+        q = db().query(Shipment).order_by(Shipment.id.desc())
+        for field in ("status", "load_ref", "carrier_id"):
+            if request.args.get(field):
+                q = q.filter_by(**{field: request.args[field]})
+        page, size = page_params()
+        items, meta = paginate(q, page, size)
+        return jsonify(shipments=[s.to_dict() for s in items], pagination=meta)
+
+    @app.get("/api/shipments/<sid>")
+    def get_shipment(sid):
+        return jsonify(_shipment_or_404(db(), sid).to_dict())
+
+    @app.get("/api/loads/<ref>/shipment")
+    def load_shipment(ref):
+        shipment = db().query(Shipment).filter_by(load_ref=ref).order_by(Shipment.id.desc()).first()
+        if shipment is None:
+            raise ApiError("no shipment for load", status_code=404, code="not_found")
+        return jsonify(shipment.to_dict())
+
+    @app.post("/api/shipments/<sid>/location")
+    def post_location(sid):
+        data = get_json()
+        lat, lon = as_float(data, "lat"), as_float(data, "lon")
+        session = db()
+        shipment = _shipment_or_404(session, sid)
+        shipment = tracking.add_location(
+            session, shipment, lat, lon,
+            speed_kmh=data.get("speed_kmh"), heading=data.get("heading"),
+            source=data.get("source", "driver"), notifier=app.config["TRACKING_NOTIFIER"],
+        )
+        return jsonify(shipment.to_dict())
+
+    @app.get("/api/shipments/<sid>/track")
+    def get_track(sid):
+        _shipment_or_404(db(), sid)
+        points = db().query(TrackPoint).filter_by(shipment_id=sid).order_by(TrackPoint.id.asc()).all()
+        return jsonify(shipment_id=sid, track=[p.to_dict() for p in points])
+
+    @app.post("/api/shipments/<sid>/status")
+    def post_status(sid):
+        data = get_json()
+        require(data, "status")
+        session = db()
+        shipment = _shipment_or_404(session, sid)
+        try:
+            shipment = tracking.update_status(
+                session, shipment, data["status"], message=data.get("message"),
+                created_by=data.get("created_by"), notifier=app.config["TRACKING_NOTIFIER"])
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(shipment.to_dict())
+
+    @app.post("/api/shipments/<sid>/delay")
+    def post_delay(sid):
+        data = get_json()
+        session = db()
+        shipment = _shipment_or_404(session, sid)
+        shipment = tracking.report_delay(
+            session, shipment, delay_minutes=as_float(data, "delay_minutes"),
+            reason_code=data.get("reason_code"), message=data.get("message"),
+            created_by=data.get("created_by"), notifier=app.config["TRACKING_NOTIFIER"])
+        return jsonify(shipment.to_dict())
+
+    @app.post("/api/shipments/<sid>/reroute")
+    def post_reroute(sid):
+        data = get_json()
+        session = db()
+        shipment = _shipment_or_404(session, sid)
+        shipment = tracking.reroute(
+            session, shipment, reason_code=data.get("reason_code"), message=data.get("message"),
+            new_destination=data.get("new_destination"), new_distance_km=data.get("new_distance_km"),
+            waypoints=data.get("waypoints"), created_by=data.get("created_by"),
+            notifier=app.config["TRACKING_NOTIFIER"])
+        return jsonify(shipment.to_dict())
+
+    @app.get("/api/shipments/<sid>/events")
+    def shipment_events(sid):
+        _shipment_or_404(db(), sid)
+        events = db().query(ShipmentEvent).filter_by(shipment_id=sid).order_by(ShipmentEvent.id.asc()).all()
+        return jsonify(shipment_id=sid, events=[e.to_dict() for e in events])
+
+    @app.get("/api/tracking/reasons")
+    def tracking_reasons():
+        return jsonify(reasons=tracking.list_reasons(db(), request.args.get("category")))
+
+    @app.post("/api/admin/tracking-reasons")
+    def add_tracking_reason():
+        data = get_json()
+        require(data, "code", "label")
+        category = data.get("category", "delay")
+        if category not in ("delay", "reroute"):
+            raise ApiError("category must be 'delay' or 'reroute'", status_code=422, code="validation_error")
+        session = db()
+        if session.query(DelayReason).filter_by(code=data["code"]).first():
+            raise ApiError("reason code already exists", status_code=409, code="conflict")
+        reason = DelayReason(code=data["code"], label=data["label"], category=category, active=True)
+        session.add(reason)
+        session.commit()
+        return jsonify(reason.to_dict()), 201
+
     # --- public holidays / business-day calendar -------------------------------
     @app.get("/api/holidays")
     def public_holidays():
@@ -593,18 +724,21 @@ def create_app(
         region_code = request.args.get("region") or app.config["DEFAULT_REGION_CODE"]
         year = int(request.args.get("year", _date.today().year))
         return jsonify(region_code=region_code, year=year,
-                       holidays=calendar_service.resolve_year(db(), region_code, year))
+                       source=app.config["SETTINGS"].holiday_provider,
+                       holidays=calendar_service.resolve_year(db(), region_code, year,
+                                                              provider=app.config["HOLIDAY_PROVIDER"]))
 
     @app.get("/api/calendar/business-day")
     def business_day():
         d = _parse_iso_date(request.args.get("date")) or _today_date()
         region_code = request.args.get("region") or app.config["DEFAULT_REGION_CODE"]
-        info = calendar_service.schedule_info(db(), region_code, d)
+        provider = app.config["HOLIDAY_PROVIDER"]
+        info = calendar_service.schedule_info(db(), region_code, d, provider=provider)
         if request.args.get("add"):
             n = int(request.args["add"])
             info["plus_business_days"] = {
                 "n": n,
-                "date": calendar_service.add_business_days(db(), region_code, d, n).isoformat(),
+                "date": calendar_service.add_business_days(db(), region_code, d, n, provider=provider).isoformat(),
             }
         return jsonify(info)
 

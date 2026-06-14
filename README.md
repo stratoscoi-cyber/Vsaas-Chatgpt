@@ -129,6 +129,7 @@ hazards (`POST/GET /api/hazards`, `DELETE /api/hazards/{id}`) ·
 | `GET /api/holidays` · `GET /api/calendar/business-day` | public-holiday & business-day calendar |
 | `/api/admin/holidays*` | **admin-only** public-holiday management (`X-Admin-Key`) |
 | `GET /api/regions/{code}/profile` | region cultural profile (currency, weekend, style, holidays) |
+| `/api/shipments/*` · `/api/tracking/reasons` | live shipment tracking, ETA, delays & reroutes |
 
 ```bash
 # Post a load, get a fair quote, bid, then ask the AI to haggle as the shipper
@@ -204,11 +205,13 @@ curl -s localhost:5003/api/offers/1/haggle -H 'content-type: application/json' \
   locale (e.g. `₦1,234.50`, `1 000 CFA`, `$1 234,50` in French). Used in haggling
   messages, quotes and tax breakdowns. Endpoints (all services):
   `GET /api/i18n/currencies`, `GET /api/i18n/format?amount=&currency=`.
-- **Public holidays** (`common/holidays.py` + LGaaS) — **admin-managed**, same
-  no-fabrication rule as tax: the platform ships with **no holidays**; an admin
-  enters the real gazetted dates (`fixed` recurring or one-off `date` for movable
-  holidays). The engine does the calendar maths (is-holiday, business-day,
-  next-business-day, add-business-days) honouring each region's weekend.
+- **Public holidays** (`common/holidays.py` + LGaaS) — two real sources, no
+  fabrication: the operator's admin table **and** the maintained
+  [`python-holidays`](https://pypi.org/project/holidays/) library
+  (`HOLIDAY_PROVIDER=library`), which ships real national calendars including
+  movable dates (e.g. Eid). Admin entries always win on a date clash. The engine
+  does the calendar maths (is-holiday, business-day, next-business-day,
+  add-business-days) honouring each region's weekend.
   - Admin: `/api/admin/holidays` (CRUD, `X-Admin-Key`).
   - Public: `GET /api/holidays?region=&year=`,
     `GET /api/calendar/business-day?region=&date=&add=`.
@@ -218,6 +221,40 @@ curl -s localhost:5003/api/offers/1/haggle -H 'content-type: application/json' \
   Sat–Sun elsewhere) and a default **negotiation-style** preset.
   `GET /api/regions/{code}/profile` returns the region, currency, weekend,
   negotiation profile and upcoming holidays.
+
+## prisaMove live shipment tracking
+
+Awarding an offer (`POST /api/offers/{id}/accept`) opens a trackable **shipment**.
+Drivers/operators report real GPS positions; ETA is computed from the reported
+location to the destination (remaining road distance ÷ average speed + accumulated
+delay) — real inputs, not a simulation.
+
+| Method & path | Purpose |
+|---------------|---------|
+| `GET /api/shipments` · `GET /api/shipments/{id}` | list / fetch shipments |
+| `GET /api/loads/{ref}/shipment` | shipment for a load |
+| `POST /api/shipments/{id}/location` | driver/operator GPS ping (updates ETA) |
+| `GET /api/shipments/{id}/track` | breadcrumb trail (for the map) |
+| `POST /api/shipments/{id}/status` | picked_up / en_route / arrived / delivered |
+| `POST /api/shipments/{id}/delay` | report a delay with a reason (recomputes ETA) |
+| `POST /api/shipments/{id}/reroute` | reroute with a reason (+ new destination/distance) |
+| `GET /api/shipments/{id}/events` | shipment timeline |
+| `GET /api/tracking/reasons?category=` | **pre-seeded** delay/reroute reasons |
+| `POST /api/admin/tracking-reasons` | add a custom reason (`X-Admin-Key`) |
+
+Delay/reroute/ETA/status changes are dispatched to a notifier (console log by
+default, or a webhook via `TRACKING_WEBHOOK_URL`). The map view with a
+driver/operator control panel is `frontend/tracking.html` (polls live). Reason
+selection is pre-seeded (traffic, accident, breakdown, weather, flooding,
+checkpoint, road closure, border delay, …) and admin-extensible.
+
+```bash
+# After accepting an offer you get a shipment_id; drive it and watch ETA move
+curl -s localhost:5003/api/shipments/$SID/location -H 'content-type: application/json' \
+  -d '{"lat":11.5,"lon":12.5,"speed_kmh":60}'
+curl -s localhost:5003/api/shipments/$SID/delay -H 'content-type: application/json' \
+  -d '{"delay_minutes":90,"reason_code":"security_checkpoint"}'
+```
 
 ## Tax / VAT / statutory payments (admin-managed)
 
@@ -295,10 +332,12 @@ routing / inference collaborators — no network required.
 ```
 agri_platform/
   common/        config, logging, errors, security, ratelimit, cache, pagination,
-                 geo, weather, db, regions, i18n, localization, currency, tax, holidays
+                 geo, weather, db, regions, i18n, localization, currency, tax,
+                 holidays, holiday_provider
   wfaas/         models, service, notifications, monitoring, ai, app, wsgi, Dockerfile
   traas/         models, routing, service, app, wsgi, Dockerfile
-  marketplace/   models, pricing, negotiation, service, app, wsgi, Dockerfile   (LGaaS / prisaMove)
+  marketplace/   models, pricing, negotiation, service, tax_service, calendar_service,
+                 tracking, app, wsgi, Dockerfile   (LGaaS / prisaMove)
 migrations/      Alembic envs for wfaas / traas / lgaas
 frontend/        index.html (GIS dashboard) + marketplace.html (prisaMove)
 tests/           pytest suite

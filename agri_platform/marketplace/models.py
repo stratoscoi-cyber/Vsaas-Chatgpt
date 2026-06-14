@@ -198,6 +198,138 @@ class TaxRule(Base):
         }
 
 
+class Shipment(Base):
+    """A live, trackable shipment created when an offer is awarded."""
+
+    __tablename__ = "shipments"
+
+    id = Column(Integer, primary_key=True)
+    shipment_id = Column(String(50), unique=True, nullable=False, index=True)
+    load_ref = Column(String(50), index=True)
+    offer_id = Column(Integer)
+    carrier_id = Column(String(50))
+    vehicle_id = Column(String(50))
+    driver_name = Column(String(120))
+    driver_phone = Column(String(40))
+    region_code = Column(String(8))
+    origin = Column(JSON)
+    destination = Column(JSON)
+    current_location = Column(JSON)  # {"lat","lon"}
+    status = Column(String(20), default="assigned")  # assigned|picked_up|en_route|delayed|arrived|delivered|cancelled
+    planned_distance_km = Column(Float)
+    avg_speed_kmh = Column(Float, default=50.0)
+    delay_minutes = Column(Float, default=0.0)
+    eta = Column(String(40))  # ISO datetime
+    currency = Column(String(8), default="USD")
+    price = Column(Float)
+    last_update_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "shipment_id": self.shipment_id,
+            "load_ref": self.load_ref,
+            "offer_id": self.offer_id,
+            "carrier_id": self.carrier_id,
+            "vehicle_id": self.vehicle_id,
+            "driver_name": self.driver_name,
+            "driver_phone": self.driver_phone,
+            "region_code": self.region_code,
+            "origin": self.origin,
+            "destination": self.destination,
+            "current_location": self.current_location,
+            "status": self.status,
+            "planned_distance_km": self.planned_distance_km,
+            "avg_speed_kmh": self.avg_speed_kmh,
+            "delay_minutes": self.delay_minutes,
+            "eta": self.eta,
+            "currency": self.currency,
+            "price": self.price,
+            "last_update_at": self.last_update_at.isoformat() if self.last_update_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class TrackPoint(Base):
+    """A GPS breadcrumb reported by the driver/operator device."""
+
+    __tablename__ = "track_points"
+
+    id = Column(Integer, primary_key=True)
+    shipment_id = Column(String(50), index=True)
+    lat = Column(Float)
+    lon = Column(Float)
+    speed_kmh = Column(Float)
+    heading = Column(Float)
+    source = Column(String(20), default="driver")  # driver|operator|gps
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "shipment_id": self.shipment_id,
+            "lat": self.lat,
+            "lon": self.lon,
+            "speed_kmh": self.speed_kmh,
+            "heading": self.heading,
+            "source": self.source,
+            "recorded_at": self.recorded_at.isoformat() if self.recorded_at else None,
+        }
+
+
+class ShipmentEvent(Base):
+    """An event in a shipment's timeline (status/location/delay/reroute/eta)."""
+
+    __tablename__ = "shipment_events"
+
+    id = Column(Integer, primary_key=True)
+    shipment_id = Column(String(50), index=True)
+    event_type = Column(String(20))  # status|location|delay|reroute|eta|note
+    status = Column(String(20))
+    reason_code = Column(String(40))
+    reason_label = Column(String(160))
+    message = Column(String(500))
+    delay_minutes = Column(Float)
+    eta = Column(String(40))
+    location = Column(JSON)
+    data = Column(JSON)
+    created_by = Column(String(50))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "shipment_id": self.shipment_id,
+            "event_type": self.event_type,
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "reason_label": self.reason_label,
+            "message": self.message,
+            "delay_minutes": self.delay_minutes,
+            "eta": self.eta,
+            "location": self.location,
+            "data": self.data,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class DelayReason(Base):
+    """A selectable delay/reroute reason. Defaults are seeded; admin-extensible."""
+
+    __tablename__ = "delay_reasons"
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String(40), unique=True, nullable=False, index=True)
+    label = Column(String(160))
+    category = Column(String(20), default="delay")  # delay|reroute
+    active = Column(Boolean, default=True)
+
+    def to_dict(self):
+        return {"code": self.code, "label": self.label, "category": self.category, "active": self.active}
+
+
 class Holiday(Base):
     """An operator-configured public holiday for a region.
 
