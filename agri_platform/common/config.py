@@ -48,6 +48,8 @@ class Settings:
     # Upstreams
     open_meteo_url: str = "https://api.open-meteo.com/v1/forecast"
     valhalla_url: Optional[str] = None
+    # TRAAS routing service (used by LGaaS reroute to compute avoidance paths)
+    traas_url: Optional[str] = None
     # Localization (Africa-centric defaults)
     default_language: str = "en"
     default_region: str = "NG"
@@ -91,6 +93,7 @@ class Settings:
             cache_ttl_seconds=_int("CACHE_TTL_SECONDS", 300),
             open_meteo_url=os.getenv("OPEN_METEO_URL", "https://api.open-meteo.com/v1/forecast"),
             valhalla_url=os.getenv("VALHALLA_URL"),
+            traas_url=os.getenv("TRAAS_URL"),
             default_language=os.getenv("DEFAULT_LANGUAGE", "en"),
             default_region=os.getenv("DEFAULT_REGION", "NG"),
             holiday_provider=os.getenv("HOLIDAY_PROVIDER", "admin"),

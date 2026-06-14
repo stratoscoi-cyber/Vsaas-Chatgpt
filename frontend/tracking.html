@@ -62,8 +62,13 @@
 
     <h2>Reroute</h2>
     <label>Reason</label><select id="rreason"></select>
-    <p class="muted" style="font-size:11px;">Optionally click the map to set a new destination.</p>
-    <button id="reroute" class="alt">Reroute</button>
+    <div class="row">
+      <div><label>Hazard lat</label><input id="hlat" /></div>
+      <div><label>Hazard lon</label><input id="hlon" /></div>
+      <div><label>Radius km</label><input id="hradius" value="3" /></div>
+    </div>
+    <p class="muted" style="font-size:11px;">With a hazard set, prisaTravel (TRAAS) computes an avoidance route and feeds the new distance into the ETA.</p>
+    <button id="reroute" class="alt">Reroute via prisaTravel</button>
 
     <h2>Timeline</h2>
     <div id="feed" class="feed"></div>
@@ -146,10 +151,20 @@
          <div class="muted">${new Date(e.created_at).toLocaleTimeString()}${e.eta ? " · ETA " + new Date(e.eta).toLocaleTimeString() : ""}</div></div>`).join("");
     }
 
+    let es = null;
     $("load").onclick = () => {
       if (pollTimer) clearInterval(pollTimer);
+      if (es) es.close();
       refresh();
-      pollTimer = setInterval(refresh, 4000);  // live polling
+      // Real-time push via Server-Sent Events; refresh on each pushed event.
+      try {
+        es = new EventSource(`${base()}/api/shipments/${sid()}/stream`);
+        es.onmessage = () => refresh();
+        es.addEventListener("snapshot", () => refresh());
+        es.onerror = () => { /* browser auto-reconnects */ };
+      } catch (_) {}
+      // Slow safety-net poll in case SSE is unavailable.
+      pollTimer = setInterval(refresh, 15000);
     };
     $("ping").onclick = async () => {
       try { await api(`/api/shipments/${sid()}/location`, jpost({ lat: parseFloat($("plat").value), lon: parseFloat($("plon").value), speed_kmh: parseFloat($("pspeed").value), source: "driver" })); refresh(); }
@@ -165,6 +180,9 @@
     $("reroute").onclick = async () => {
       const body = { reason_code: $("rreason").value };
       if (newDest) body.new_destination = newDest;
+      if ($("hlat").value && $("hlon").value) {
+        body.hazard = { lat: parseFloat($("hlat").value), lon: parseFloat($("hlon").value), radius_km: parseFloat($("hradius").value || "3") };
+      }
       try { await api(`/api/shipments/${sid()}/reroute`, jpost(body)); newDest = null; refresh(); } catch (e) { alert(e.message); }
     };
   </script>

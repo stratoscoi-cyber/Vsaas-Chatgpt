@@ -8,10 +8,12 @@ proposes counter-offers and messages.
 
 from __future__ import annotations
 
+import json
 import uuid
+from queue import Empty
 from typing import Optional
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 from sqlalchemy import text
 
 from ..common import db as db_helpers
@@ -25,8 +27,10 @@ from ..common.security import install_admin_auth, install_auth
 from ..common import currency as currency_mod
 from ..common import regions
 from ..common import tax as tax_engine
+from ..common.eventbus import EventBus
 from ..common.holiday_provider import make_holiday_provider
 from . import calendar_service, negotiation, service, tax_service, tracking
+from .routing_client import make_traas_client
 from .models import (
     Base, DelayReason, Holiday, Load, NegotiationMessage, Offer, Shipment,
     ShipmentEvent, TaxRule, TrackPoint, Vehicle,
@@ -46,6 +50,7 @@ def create_app(
     composer: Optional[negotiation.MessageComposer] = None,
     holiday_provider=None,
     tracking_notifier=None,
+    traas_client=None,
 ) -> Flask:
     settings = settings or Settings.from_env(SERVICE_NAME, default_port=5003)
     configure_logging(settings.log_level, settings.log_json)
@@ -59,7 +64,13 @@ def create_app(
     app.config["SESSION_FACTORY"] = session_factory
     app.config["COMPOSER"] = composer or negotiation.make_composer(settings.haggle_ai_endpoint)
     app.config["HOLIDAY_PROVIDER"] = holiday_provider or make_holiday_provider(settings.holiday_provider)
-    app.config["TRACKING_NOTIFIER"] = tracking_notifier or tracking.make_tracking_notifier(settings)
+    app.config["TRAAS_CLIENT"] = traas_client or make_traas_client(settings.traas_url)
+    # Event bus backs server-sent events; every shipment event also reaches the
+    # configured webhook/console notifier via a composite.
+    bus = EventBus()
+    app.config["EVENT_BUS"] = bus
+    base_notifier = tracking_notifier or tracking.make_tracking_notifier(settings)
+    app.config["TRACKING_NOTIFIER"] = tracking.CompositeNotifier([tracking.BusTrackingNotifier(bus), base_notifier])
 
     install_request_logging(app, SERVICE_NAME)
     install_auth(app, settings.api_keys, settings.auth_enabled)
@@ -688,9 +699,37 @@ def create_app(
         shipment = tracking.reroute(
             session, shipment, reason_code=data.get("reason_code"), message=data.get("message"),
             new_destination=data.get("new_destination"), new_distance_km=data.get("new_distance_km"),
-            waypoints=data.get("waypoints"), created_by=data.get("created_by"),
+            waypoints=data.get("waypoints"), hazard=data.get("hazard"),
+            traas_client=app.config["TRAAS_CLIENT"], created_by=data.get("created_by"),
             notifier=app.config["TRACKING_NOTIFIER"])
         return jsonify(shipment.to_dict())
+
+    @app.get("/api/shipments/<sid>/stream")
+    def stream_shipment(sid):
+        """Server-Sent Events stream of a shipment's live events (push)."""
+        shipment = _shipment_or_404(db(), sid)
+        snapshot = shipment.to_dict()
+        bus = app.config["EVENT_BUS"]
+        channel = f"shipment:{sid}"
+        q = bus.subscribe(channel)
+
+        @stream_with_context
+        def gen():
+            try:
+                yield "retry: 3000\n\n"
+                yield f"event: snapshot\ndata: {json.dumps(snapshot)}\n\n"
+                while True:
+                    try:
+                        event = q.get(timeout=15)
+                        yield f"event: {event.get('event_type', 'message')}\ndata: {json.dumps(event)}\n\n"
+                    except Empty:
+                        yield ": keep-alive\n\n"
+            finally:
+                bus.unsubscribe(channel, q)
+
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                 "Connection": "keep-alive"})
 
     @app.get("/api/shipments/<sid>/events")
     def shipment_events(sid):
@@ -763,7 +802,8 @@ def _parse_iso_date(value):
 def main():
     settings = Settings.from_env(SERVICE_NAME, default_port=5003)
     app = create_app(settings)
-    app.run(host="0.0.0.0", port=settings.port, debug=False)
+    # threaded so SSE streams don't block other requests in the dev server.
+    app.run(host="0.0.0.0", port=settings.port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":

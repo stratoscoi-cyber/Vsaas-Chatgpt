@@ -98,10 +98,11 @@ services:
     build:
       context: .
       dockerfile: agri_platform/marketplace/Dockerfile
-    depends_on: [postgres-lgaas, redis]
+    depends_on: [postgres-lgaas, redis, traas]
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:-postgres}@postgres-lgaas:5432/lgaas
       REDIS_URL: redis://redis:6379/1
+      TRAAS_URL: http://traas:5002
       AUTH_ENABLED: "${AUTH_ENABLED:-false}"
       API_KEYS: "${API_KEYS:-}"
       ADMIN_API_KEYS: "${ADMIN_API_KEYS:-}"

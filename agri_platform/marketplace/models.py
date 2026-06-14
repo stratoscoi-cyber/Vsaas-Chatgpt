@@ -218,6 +218,9 @@ class Shipment(Base):
     status = Column(String(20), default="assigned")  # assigned|picked_up|en_route|delayed|arrived|delivered|cancelled
     planned_distance_km = Column(Float)
     avg_speed_kmh = Column(Float, default=50.0)
+    # Detour multiplier vs. straight-line distance; set after a TRAAS reroute so
+    # the avoidance penalty carries forward into the ETA as the driver moves.
+    route_factor = Column(Float)
     delay_minutes = Column(Float, default=0.0)
     eta = Column(String(40))  # ISO datetime
     currency = Column(String(8), default="USD")
@@ -242,6 +245,7 @@ class Shipment(Base):
             "status": self.status,
             "planned_distance_km": self.planned_distance_km,
             "avg_speed_kmh": self.avg_speed_kmh,
+            "route_factor": self.route_factor,
             "delay_minutes": self.delay_minutes,
             "eta": self.eta,
             "currency": self.currency,

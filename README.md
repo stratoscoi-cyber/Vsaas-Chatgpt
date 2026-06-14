@@ -237,16 +237,30 @@ delay) — real inputs, not a simulation.
 | `GET /api/shipments/{id}/track` | breadcrumb trail (for the map) |
 | `POST /api/shipments/{id}/status` | picked_up / en_route / arrived / delivered |
 | `POST /api/shipments/{id}/delay` | report a delay with a reason (recomputes ETA) |
-| `POST /api/shipments/{id}/reroute` | reroute with a reason (+ new destination/distance) |
+| `POST /api/shipments/{id}/reroute` | reroute (calls prisaTravel for a hazard-avoiding path) |
 | `GET /api/shipments/{id}/events` | shipment timeline |
+| `GET /api/shipments/{id}/stream` | **Server-Sent Events** live push stream |
 | `GET /api/tracking/reasons?category=` | **pre-seeded** delay/reroute reasons |
 | `POST /api/admin/tracking-reasons` | add a custom reason (`X-Admin-Key`) |
 
-Delay/reroute/ETA/status changes are dispatched to a notifier (console log by
-default, or a webhook via `TRACKING_WEBHOOK_URL`). The map view with a
-driver/operator control panel is `frontend/tracking.html` (polls live). Reason
-selection is pre-seeded (traffic, accident, breakdown, weather, flooding,
-checkpoint, road closure, border delay, …) and admin-extensible.
+**Real-time push.** Every shipment event is published to an in-process event bus
+and streamed over **Server-Sent Events** (`GET /api/shipments/{id}/stream`); the
+map (`frontend/tracking.html`) updates from the SSE stream (with a slow poll as a
+fallback). The bus is process-local — back it with Redis pub/sub to fan across
+multiple gunicorn workers/replicas.
+
+**Hazard-aware reroute.** `POST /api/shipments/{id}/reroute` with a `reason_code`
+and optional `hazard` `{lat,lon,radius_km}` calls **prisaTravel (TRAAS)**: it
+registers the hazard, requests a hazard-avoiding route from the current position,
+and feeds the returned distance back into the ETA as a `route_factor` that carries
+the detour penalty forward (set `TRAAS_URL`). Without TRAAS, an operator-supplied
+`new_distance_km` is used.
+
+Delay/reroute/ETA/status changes are also dispatched to a notifier (console log by
+default, or a webhook via `TRACKING_WEBHOOK_URL`). The map view has a
+driver/operator control panel. Reason selection is pre-seeded (traffic, accident,
+breakdown, weather, flooding, checkpoint, road closure, border delay, …) and
+admin-extensible.
 
 ```bash
 # After accepting an offer you get a shipment_id; drive it and watch ETA move
@@ -333,11 +347,11 @@ routing / inference collaborators — no network required.
 agri_platform/
   common/        config, logging, errors, security, ratelimit, cache, pagination,
                  geo, weather, db, regions, i18n, localization, currency, tax,
-                 holidays, holiday_provider
+                 holidays, holiday_provider, eventbus
   wfaas/         models, service, notifications, monitoring, ai, app, wsgi, Dockerfile
   traas/         models, routing, service, app, wsgi, Dockerfile
   marketplace/   models, pricing, negotiation, service, tax_service, calendar_service,
-                 tracking, app, wsgi, Dockerfile   (LGaaS / prisaMove)
+                 tracking, routing_client, app, wsgi, Dockerfile   (LGaaS / prisaMove)
 migrations/      Alembic envs for wfaas / traas / lgaas
 frontend/        index.html (GIS dashboard) + marketplace.html (prisaMove)
 tests/           pytest suite

@@ -71,6 +71,11 @@ class ConsoleTrackingNotifier:
         return True
 
 
+# Event types worth an outbound webhook (location pings are high-frequency and
+# stream over SSE instead).
+WEBHOOK_EVENTS = {"status", "delay", "reroute", "eta"}
+
+
 class WebhookTrackingNotifier:
     def __init__(self, url: str, timeout: float = 10.0):
         self.url = url
@@ -78,6 +83,8 @@ class WebhookTrackingNotifier:
         self._fallback = ConsoleTrackingNotifier()
 
     def dispatch(self, shipment, event) -> bool:
+        if event.event_type not in WEBHOOK_EVENTS:
+            return True
         try:
             requests.post(self.url, json={"shipment": shipment.to_dict(), "event": event.to_dict()},
                           timeout=self.timeout)
@@ -85,6 +92,35 @@ class WebhookTrackingNotifier:
         except requests.RequestException as exc:
             logger.warning("tracking webhook failed: %s", exc)
             return self._fallback.dispatch(shipment, event)
+
+
+class BusTrackingNotifier:
+    """Publishes every event to an in-process EventBus for SSE streaming."""
+
+    def __init__(self, bus, channel_prefix: str = "shipment:"):
+        self._bus = bus
+        self._prefix = channel_prefix
+
+    def dispatch(self, shipment, event) -> bool:
+        self._bus.publish(self._prefix + shipment.shipment_id, event.to_dict())
+        return True
+
+
+class CompositeNotifier:
+    """Fans an event out to several notifiers (e.g. bus + webhook)."""
+
+    def __init__(self, notifiers):
+        self._notifiers = [n for n in notifiers if n is not None]
+
+    def dispatch(self, shipment, event) -> bool:
+        ok = True
+        for n in self._notifiers:
+            try:
+                ok = n.dispatch(shipment, event) and ok
+            except Exception:  # pragma: no cover - a sink must not break tracking
+                logger.exception("tracking notifier failed")
+                ok = False
+        return ok
 
 
 def make_tracking_notifier(settings) -> TrackingNotifier:
@@ -136,7 +172,10 @@ def remaining_km(shipment: Shipment) -> float:
     if not point or not dest:
         return 0.0
     straight = haversine_km(point["lat"], point["lon"], dest["lat"], dest["lon"])
-    return straight * ROAD_DISTANCE_FACTOR
+    # A reroute may have set a detour factor (rerouted distance / straight line);
+    # otherwise use the baseline road factor.
+    factor = shipment.route_factor or ROAD_DISTANCE_FACTOR
+    return straight * factor
 
 
 def compute_eta(shipment: Shipment, now: Optional[datetime] = None) -> str:
@@ -154,7 +193,9 @@ def _event(session, shipment, notifier, **kwargs) -> ShipmentEvent:
     event = ShipmentEvent(shipment_id=shipment.shipment_id, **kwargs)
     session.add(event)
     session.flush()
-    if notifier is not None and kwargs.get("event_type") in ("status", "delay", "reroute", "eta"):
+    # Every event is dispatched; each notifier decides what to do with it
+    # (the bus streams all of them, the webhook filters to important ones).
+    if notifier is not None:
         notifier.dispatch(shipment, event)
     return event
 
@@ -247,12 +288,49 @@ def report_delay(session, shipment, *, delay_minutes, reason_code=None, message=
 
 
 def reroute(session, shipment, *, reason_code=None, message=None, new_destination=None,
-            new_distance_km=None, waypoints=None, created_by=None, notifier=None) -> Shipment:
+            new_distance_km=None, waypoints=None, hazard=None, traas_client=None,
+            created_by=None, notifier=None) -> Shipment:
+    """Reroute a shipment around a hazard and recompute the ETA.
+
+    Distance precedence: an explicit ``new_distance_km`` wins; otherwise, if a
+    TRAAS client is available, ask it for a hazard-avoiding route from the current
+    position and use that distance; otherwise leave the estimate unchanged. The
+    rerouted distance is converted into a ``route_factor`` so the detour penalty
+    carries forward into the ETA as the driver continues to report positions.
+    """
+    from .routing_client import REASON_TO_HAZARD, RoutingClientError
+
     label = _reason_label(session, reason_code)
     if new_destination:
         shipment.destination = new_destination
-    if new_distance_km is not None:
-        shipment.planned_distance_km = float(new_distance_km)
+
+    point = shipment.current_location or shipment.origin
+    dest = shipment.destination
+    straight = haversine_km(point["lat"], point["lon"], dest["lat"], dest["lon"]) if point and dest else 0.0
+
+    distance = float(new_distance_km) if new_distance_km is not None else None
+    routed_via = "operator" if distance is not None else None
+    if distance is None and traas_client is not None and point and dest:
+        try:
+            if hazard and hazard.get("lat") is not None and hazard.get("lon") is not None:
+                traas_client.add_hazard(
+                    REASON_TO_HAZARD.get(reason_code, "safety"),
+                    {"lat": hazard["lat"], "lon": hazard["lon"]},
+                    radius_km=float(hazard.get("radius_km", 3.0)),
+                )
+            route = traas_client.optimize([point["lat"], point["lon"]], [dest["lat"], dest["lon"]])
+            if route.get("distance_km"):
+                distance = float(route["distance_km"])
+                waypoints = waypoints or route.get("path")
+                routed_via = "traas"
+        except RoutingClientError as exc:
+            logger.warning("reroute via TRAAS failed, keeping estimate: %s", exc)
+
+    if distance is not None:
+        shipment.planned_distance_km = distance
+        if straight > 0:
+            shipment.route_factor = max(1.0, distance / straight)
+
     if shipment.status not in ("delivered", "arrived", "cancelled"):
         shipment.status = "en_route"
     shipment.eta = compute_eta(shipment)
@@ -260,7 +338,8 @@ def reroute(session, shipment, *, reason_code=None, message=None, new_destinatio
     _event(session, shipment, notifier, event_type="reroute", status=shipment.status,
            reason_code=reason_code, reason_label=label,
            message=message or f"Rerouted: {label or 'unspecified'}", eta=shipment.eta,
-           location=shipment.current_location, data={"waypoints": waypoints,
-           "planned_distance_km": shipment.planned_distance_km}, created_by=created_by)
+           location=shipment.current_location,
+           data={"waypoints": waypoints, "planned_distance_km": shipment.planned_distance_km,
+                 "routed_via": routed_via}, created_by=created_by)
     session.commit()
     return shipment
