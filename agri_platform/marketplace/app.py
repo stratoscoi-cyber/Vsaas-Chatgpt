@@ -34,15 +34,15 @@ from ..common.eventbus import make_event_bus
 from ..common.holiday_provider import make_holiday_provider
 from . import (
     calendar_service, compliance_service, demand, fleet, insurance, kyc, loads_planning,
-    negotiation, payments, reputation, resilience, service, service_centers, tax_service,
-    telematics, tenants, tracking, trust,
+    negotiation, onboarding, payments, reputation, resilience, service, service_centers,
+    tax_service, telematics, tenants, tracking, trust,
 )
 from .routing_client import make_traas_client
 from .models import (
     ApprovedAgency, Base, ComplianceDecision, ComplianceDocument, Consolidation,
     DelayReason, Driver, Escrow, Holiday, Inspection, InsuranceClaim, InsurancePolicy,
-    InsuranceRate, KycCheck, Load, NegotiationMessage, Offer, RegionComplianceRule,
-    ServiceCenter, Shipment, ShipmentEvent, TaxRule, TrackPoint, Vehicle,
+    InsuranceRate, KycCheck, Load, NegotiationMessage, Offer, Party, RegionComplianceRule,
+    RoleRequirement, ServiceCenter, Shipment, ShipmentEvent, TaxRule, TrackPoint, Vehicle,
 )
 
 SERVICE_NAME = "lgaas"
@@ -888,6 +888,107 @@ def create_app(
     def list_region_rules():
         return jsonify(region_rules=[r.to_dict() for r in db().query(RegionComplianceRule).all()])
 
+    # --- role requirements (admin; drivers use region-rules above) -------------
+    @app.post("/api/admin/role-requirements")
+    def upsert_role_requirement():
+        data = get_json()
+        require(data, "region_code", "role")
+        if data["role"] not in onboarding.PARTY_ROLES:
+            raise ApiError("role must be one of " + ", ".join(onboarding.PARTY_ROLES),
+                           status_code=422, code="validation_error")
+        session = db()
+        rr = session.query(RoleRequirement).filter_by(region_code=data["region_code"], role=data["role"]).first()
+        if rr is None:
+            rr = RoleRequirement(region_code=data["region_code"], role=data["role"])
+            session.add(rr)
+        for f in ("required_docs", "required_screening", "min_experience_years",
+                  "needs_accreditation", "active"):
+            if f in data:
+                setattr(rr, f, data[f])
+        session.commit()
+        return jsonify(rr.to_dict())
+
+    @app.get("/api/admin/role-requirements")
+    def list_role_requirements():
+        q = db().query(RoleRequirement)
+        if request.args.get("role"):
+            q = q.filter_by(role=request.args["role"])
+        return jsonify(role_requirements=[r.to_dict() for r in q.all()])
+
+    # --- generic party onboarding (operators, fleet managers, agents, MSPs) ----
+    def _party_or_404(session, pid) -> Party:
+        party = session.query(Party).filter_by(party_id=pid).first()
+        if party is None:
+            raise ApiError("party not found", status_code=404, code="not_found")
+        return party
+
+    @app.post("/api/parties")
+    def register_party():
+        data = get_json()
+        require(data, "party_id", "party_type")
+        if data["party_type"] not in onboarding.PARTY_ROLES:
+            raise ApiError("party_type must be one of " + ", ".join(onboarding.PARTY_ROLES),
+                           status_code=422, code="validation_error")
+        session = db()
+        if session.query(Party).filter_by(party_id=data["party_id"]).first():
+            raise ApiError("party already exists", status_code=409, code="conflict")
+        party = Party(party_id=data["party_id"], party_type=data["party_type"], name=data.get("name"),
+                      owner_id=data.get("owner_id"), parent_id=data.get("parent_id"),
+                      region_code=data.get("region_code"),
+                      experience_years=float(data.get("experience_years", 0) or 0),
+                      compliance_status="pending")
+        tenants.stamp(party)
+        session.add(party)
+        session.commit()
+        return jsonify(party.to_dict()), 201
+
+    @app.get("/api/parties")
+    def list_parties():
+        q = db().query(Party).order_by(Party.id.desc())
+        for f in ("party_type", "compliance_status", "region_code", "owner_id"):
+            if request.args.get(f):
+                q = q.filter_by(**{f: request.args[f]})
+        page, size = page_params()
+        items, meta = paginate(q, page, size)
+        return jsonify(parties=[p.to_dict() for p in items], pagination=meta)
+
+    @app.get("/api/parties/<pid>")
+    def get_party(pid):
+        session = db()
+        party = _party_or_404(session, pid)
+        return jsonify(onboarding.profile(session, party, role=party.party_type, entity_id=pid))
+
+    @app.post("/api/parties/<pid>/submit")
+    def submit_party(pid):
+        session = db()
+        party = _party_or_404(session, pid)
+        return jsonify(onboarding.submit(
+            session, party, role=party.party_type, entity_id=pid, region_code=party.region_code,
+            name=party.name, experience_years=party.experience_years, owner_id=party.owner_id,
+            kyc_provider=app.config["KYC_PROVIDER"]))
+
+    @app.get("/api/parties/<pid>/risk")
+    def party_risk(pid):
+        session = db()
+        party = _party_or_404(session, pid)
+        return jsonify(onboarding.risk_assessment(
+            session, role=party.party_type, entity_id=pid, owner_id=party.owner_id,
+            reasons=[], screening_clear=None, screening_required=False))
+
+    @app.post("/api/admin/parties/<pid>/status")
+    def transition_party(pid):
+        data = get_json()
+        require(data, "action", "decided_by")
+        session = db()
+        party = _party_or_404(session, pid)
+        try:
+            out = onboarding.transition(session, party, role=party.party_type, entity_id=pid,
+                                        action=data["action"], reason=data.get("reason"),
+                                        decided_by=data["decided_by"])
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(out)
+
     # --- onboarding entities ---------------------------------------------------
     @app.post("/api/drivers")
     def register_driver():
@@ -968,8 +1069,9 @@ def create_app(
     def add_document():
         data = get_json()
         require(data, "entity_type", "entity_id", "doc_type")
-        if data["entity_type"] not in ("driver", "vehicle", "service_center"):
-            raise ApiError("invalid entity_type", status_code=422, code="validation_error")
+        if data["entity_type"] not in onboarding.ONBOARDING_ENTITY_TYPES:
+            raise ApiError("invalid entity_type", status_code=422, code="validation_error",
+                           details={"allowed": list(onboarding.ONBOARDING_ENTITY_TYPES)})
         doc_hash = data.get("doc_hash")
         if not doc_hash and data.get("reference"):
             doc_hash = hashlib.sha256(str(data["reference"]).encode()).hexdigest()[:32]
@@ -1044,13 +1146,39 @@ def create_app(
         return jsonify(insp.to_dict()), 201
 
     # --- compliance evaluation -------------------------------------------------
-    @app.post("/api/drivers/<did>/submit")
-    def submit_driver(did):
-        session = db()
+    def _driver_or_404(session, did) -> Driver:
         driver = session.query(Driver).filter_by(driver_id=did).first()
         if driver is None:
             raise ApiError("driver not found", status_code=404, code="not_found")
-        return jsonify(compliance_service.evaluate_driver(session, driver).to_dict())
+        return driver
+
+    @app.post("/api/drivers/<did>/submit")
+    def submit_driver(did):
+        session = db()
+        driver = _driver_or_404(session, did)
+        return jsonify(onboarding.submit(
+            session, driver, role="driver", entity_id=did, region_code=driver.region_code,
+            name=driver.name, experience_years=driver.experience_years, owner_id=driver.owner_id,
+            kyc_provider=app.config["KYC_PROVIDER"]))
+
+    @app.get("/api/drivers/<did>")
+    def get_driver(did):
+        session = db()
+        return jsonify(onboarding.profile(session, _driver_or_404(session, did), role="driver", entity_id=did))
+
+    @app.post("/api/admin/drivers/<did>/status")
+    def transition_driver(did):
+        data = get_json()
+        require(data, "action", "decided_by")
+        session = db()
+        driver = _driver_or_404(session, did)
+        try:
+            out = onboarding.transition(session, driver, role="driver", entity_id=did,
+                                        action=data["action"], reason=data.get("reason"),
+                                        decided_by=data["decided_by"])
+        except ValueError as exc:
+            raise ApiError(str(exc), status_code=422, code="validation_error")
+        return jsonify(out)
 
     @app.post("/api/vehicles/<vid>/submit")
     def submit_vehicle(vid):

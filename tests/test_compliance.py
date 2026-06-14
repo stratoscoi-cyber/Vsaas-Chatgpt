@@ -151,7 +151,7 @@ def test_full_onboarding_approves_and_enables_offer(client):
                                       "owner_id": "o1"})
     _doc_api(client, "driver", "d1", "drivers_license", issuer_code="DVLA", reference="DL-1")
     _doc_api(client, "driver", "d1", "experience_proof", reference="EXP-1")
-    assert client.post("/api/drivers/d1/submit").get_json()["decision"] == "approved"
+    assert client.post("/api/drivers/d1/submit").get_json()["status"] == "approved"
     # service center (different owner -> no self-inspection)
     client.post("/api/service-centers", json={"center_id": "vio-1", "owner_id": "co", "region_code": "NG"})
     # vehicle
@@ -220,4 +220,4 @@ def test_duplicate_document_flagged(client):
     _doc_api(client, "driver", "dy", "drivers_license", issuer_code="DVLA", reference="SHARED")
     _doc_api(client, "driver", "dy", "experience_proof", reference="EXPY")
     res = client.post("/api/drivers/dy/submit").get_json()
-    assert "duplicate_document" in res["signals"]
+    assert "duplicate_document" in res["risk"]["signals"]

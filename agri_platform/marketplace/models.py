@@ -495,6 +495,7 @@ class RegionComplianceRule(Base):
     # e.g. ["accreditation","business_license","tax_certificate","equipment_certification"]
     required_service_center_docs = Column(JSON, default=list)
     min_experience_years = Column(Float, default=2.0)
+    require_driver_screening = Column(Boolean, default=False)
     min_insured_value = Column(Float, default=0.0)
     inspection_interval_days = Column(Integer, default=180)
     require_tracker = Column(Boolean, default=True)
@@ -508,6 +509,7 @@ class RegionComplianceRule(Base):
             "required_vehicle_docs": self.required_vehicle_docs or [],
             "required_service_center_docs": self.required_service_center_docs or [],
             "min_experience_years": self.min_experience_years,
+            "require_driver_screening": self.require_driver_screening,
             "min_insured_value": self.min_insured_value,
             "inspection_interval_days": self.inspection_interval_days,
             "require_tracker": self.require_tracker,
@@ -529,13 +531,19 @@ class Driver(Base):
     owner_id = Column(String(50), index=True)
     region_code = Column(String(8))
     experience_years = Column(Float, default=0.0)
-    compliance_status = Column(String(16), default="pending")
+    compliance_status = Column(String(16), default="pending")  # pending|under_review|approved|rejected|suspended
+    risk_score = Column(Float)
+    risk_band = Column(String(12))
+    suspended_reason = Column(String(300))
+    screening_status = Column(String(40))
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self):
         return {"driver_id": self.driver_id, "name": self.name, "owner_id": self.owner_id,
                 "region_code": self.region_code, "experience_years": self.experience_years,
-                "compliance_status": self.compliance_status,
+                "compliance_status": self.compliance_status, "risk_score": self.risk_score,
+                "risk_band": self.risk_band, "suspended_reason": self.suspended_reason,
+                "screening_status": self.screening_status,
                 "created_at": self.created_at.isoformat() if self.created_at else None}
 
 
@@ -933,4 +941,67 @@ class KycCheck(Base):
         return {"id": self.id, "document_id": self.document_id, "entity_type": self.entity_type,
                 "entity_id": self.entity_id, "provider": self.provider, "kind": self.kind,
                 "verified": self.verified, "status": self.status, "details": self.details,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+class RoleRequirement(Base):
+    """Admin-managed onboarding requirements per (region, role).
+
+    Roles: driver | logistics_operator | fleet_manager | inspection_agent | msp.
+    Ships with none; the engine returns 'review' until configured.
+    """
+
+    __tablename__ = "role_requirements"
+
+    id = Column(Integer, primary_key=True)
+    region_code = Column(String(8), index=True)
+    role = Column(String(30), index=True)
+    required_docs = Column(JSON, default=list)
+    required_screening = Column(Boolean, default=False)  # sanctions/PEP screening required
+    min_experience_years = Column(Float, default=0.0)
+    needs_accreditation = Column(Boolean, default=False)
+    active = Column(Boolean, default=True)
+
+    def to_dict(self):
+        return {"region_code": self.region_code, "role": self.role,
+                "required_docs": self.required_docs or [], "required_screening": self.required_screening,
+                "min_experience_years": self.min_experience_years,
+                "needs_accreditation": self.needs_accreditation, "active": self.active}
+
+    def to_rule(self):
+        return self.to_dict()
+
+
+class Party(Base):
+    """A registrant for an organisational/agent onboarding role.
+
+    Covers logistics_operator, fleet_manager, inspection_agent and msp; drivers
+    use the dedicated :class:`Driver` model but share the onboarding engine.
+    """
+
+    __tablename__ = "parties"
+
+    id = Column(Integer, primary_key=True)
+    party_id = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
+    party_type = Column(String(30), index=True)  # the role
+    name = Column(String(160))
+    owner_id = Column(String(50), index=True)
+    parent_id = Column(String(50))  # e.g. an operator managed by an MSP
+    region_code = Column(String(8))
+    experience_years = Column(Float, default=0.0)
+    compliance_status = Column(String(16), default="pending")  # pending|under_review|approved|rejected|suspended
+    risk_score = Column(Float)
+    risk_band = Column(String(12))
+    suspended_reason = Column(String(300))
+    screening_status = Column(String(40))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"party_id": self.party_id, "tenant_id": self.tenant_id, "party_type": self.party_type,
+                "name": self.name, "owner_id": self.owner_id, "parent_id": self.parent_id,
+                "region_code": self.region_code, "experience_years": self.experience_years,
+                "compliance_status": self.compliance_status, "risk_score": self.risk_score,
+                "risk_band": self.risk_band, "suspended_reason": self.suspended_reason,
+                "screening_status": self.screening_status,
                 "created_at": self.created_at.isoformat() if self.created_at else None}

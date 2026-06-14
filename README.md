@@ -293,6 +293,7 @@ Loads carry a **mode** and an auto-derived **scope**:
 | **KYC / verification** | `POST /api/compliance/documents/{id}/verify`, `POST /api/compliance/screen` (auto on document submit) | OCR/issuer verification + sanctions screening via a provider; **manual provider verifies nothing** — no fabricated verification |
 | **Multi-tenant isolation** | `X-Tenant-ID` header + `TENANT_ISOLATION=true` | **central** SQLAlchemy guard auto-stamps new rows and filters **all** ORM reads for every tenant model (cross-tenant access → 404) |
 | **Service-station onboarding** | `POST /api/service-centers/{id}/submit`, `/risk`, `/reputation`; `POST /api/admin/service-centers/{id}/status` | regulatory compliance + risk assessment + reputation, lifecycle `pending→under_review→approved/rejected/suspended`; self-inspection rings auto-route to review |
+| **Party onboarding (people & orgs)** | `POST /api/parties` + `/{id}/submit`, `/risk`; `POST /api/admin/role-requirements`, `POST /api/admin/parties/{id}/status`; drivers via `/api/drivers/{id}/submit` + `/api/admin/drivers/{id}/status` | one engine for **drivers, logistics operators, fleet managers, inspection agents, MSPs**: admin-configured per-region/role docs + experience + sanctions screening; risk + lifecycle + admin transitions |
 
 `KYC_ENDPOINT`/`SANCTIONS_ENDPOINT` plug real verification providers; without them
 documents stay unverified (operator/manual review). With `REDIS_URL` set, the SSE
@@ -302,6 +303,16 @@ event bus uses Redis pub/sub so live tracking streams fan across gunicorn worker
 a `before_flush` hook (stamp `tenant_id` on every new row) and a `do_orm_execute`
 hook (apply a tenant predicate to every ORM SELECT, including joins, counts and
 lazy loads), so coverage is uniform across all endpoints rather than per-handler.
+
+**Unified party onboarding** (`onboarding.py`) applies one deterministic state
+machine to **drivers, logistics operators, fleet managers, platform inspection
+agents and MSPs**. Requirements are admin-managed per `(region, role)`
+(`RoleRequirement`; drivers reuse `RegionComplianceRule`): required documents from
+approved agencies, minimum experience, and optional sanctions/PEP **screening**
+via the KYC provider (a screening requirement with no real provider → review, not
+auto-approve). Risk signals (re-used documents, screening hits, inspection-agent
+conflict of interest, poor reputation) route clean parties to review; admins
+transition status (approve/suspend/reinstate/reject) with auditable reasons.
 
 **Service-station onboarding** is a state machine: a centre is registered, submits
 regulatory documents (per-region `required_service_center_docs` from approved
@@ -448,7 +459,7 @@ agri_platform/
   marketplace/   models, pricing, negotiation, service, tax_service, calendar_service,
                  tracking, routing_client, compliance, compliance_service, loads_planning,
                  reputation, telematics, payments, insurance, demand, fleet, trust,
-                 resilience, kyc, tenants, service_centers, app, wsgi, Dockerfile
+                 resilience, kyc, tenants, service_centers, onboarding, app, wsgi, Dockerfile
 migrations/      Alembic envs for wfaas / traas / lgaas
 frontend/        index.html (GIS dashboard) + marketplace.html (prisaMove)
 tests/           pytest suite
