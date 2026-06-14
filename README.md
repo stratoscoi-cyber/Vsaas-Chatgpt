@@ -290,6 +290,12 @@ Loads carry a **mode** and an auto-derived **scope**:
 | **Trust & safety** | `GET /api/ops/review-queue`, `/api/trust/clusters` | review queue (risk-ranked); self-inspection rings & shared-document clusters |
 | **Resilience** | `Idempotency-Key` header; `X-Tenant-ID`; admin audit log; Redis-backed event bus (`REDIS_URL`) | exactly-once mutations; auditable admin actions; SSE across workers |
 | **Channels & PWA** | `POST /api/notifications/send` (sms/whatsapp/push); `frontend/` PWA (manifest + service worker) | provider webhooks (console fallback); offline-capable app shell |
+| **KYC / verification** | `POST /api/compliance/documents/{id}/verify`, `POST /api/compliance/screen` (auto on document submit) | OCR/issuer verification + sanctions screening via a provider; **manual provider verifies nothing** — no fabricated verification |
+| **Multi-tenant isolation** | `X-Tenant-ID` header + `TENANT_ISOLATION=true` | rows stamped per tenant; reads scoped per tenant (cross-tenant access → 404) |
+
+`KYC_ENDPOINT`/`SANCTIONS_ENDPOINT` plug real verification providers; without them
+documents stay unverified (operator/manual review). With `REDIS_URL` set, the SSE
+event bus uses Redis pub/sub so live tracking streams fan across gunicorn workers.
 
 These build on the same principles: deterministic logic over real data, with external
 providers (payment gateway, insurers, SMS/WhatsApp) behind adapters that do nothing
@@ -428,7 +434,7 @@ agri_platform/
   marketplace/   models, pricing, negotiation, service, tax_service, calendar_service,
                  tracking, routing_client, compliance, compliance_service, loads_planning,
                  reputation, telematics, payments, insurance, demand, fleet, trust,
-                 resilience, app, wsgi, Dockerfile   (LGaaS / prisaMove)
+                 resilience, kyc, tenants, app, wsgi, Dockerfile   (LGaaS / prisaMove)
 migrations/      Alembic envs for wfaas / traas / lgaas
 frontend/        index.html (GIS dashboard) + marketplace.html (prisaMove)
 tests/           pytest suite

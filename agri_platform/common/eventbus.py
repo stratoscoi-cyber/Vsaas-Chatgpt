@@ -57,11 +57,14 @@ class RedisEventBus:
     feeds a local queue, so SSE works across multiple workers/replicas.
     """
 
-    def __init__(self, redis_url: str, prefix: str = "evbus:", max_queue: int = 100):
-        import redis  # optional dependency
+    def __init__(self, redis_url: str = None, client=None, prefix: str = "evbus:", max_queue: int = 100):
+        if client is not None:
+            self._redis = client
+        else:
+            import redis  # optional dependency
 
-        self._redis = redis.Redis.from_url(redis_url, decode_responses=True)
-        self._redis.ping()
+            self._redis = redis.Redis.from_url(redis_url, decode_responses=True)
+            self._redis.ping()
         self._prefix = prefix
         self._max_queue = max_queue
         self._threads: Dict[Queue, threading.Thread] = {}

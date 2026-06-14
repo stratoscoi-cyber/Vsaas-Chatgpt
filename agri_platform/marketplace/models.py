@@ -18,6 +18,7 @@ class Load(Base):
 
     id = Column(Integer, primary_key=True)
     ref = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
     shipper_id = Column(String(50), index=True)
     title = Column(String(160))
     origin = Column(JSON)        # {"lat","lon","address"}
@@ -50,6 +51,7 @@ class Load(Base):
     def to_dict(self):
         return {
             "ref": self.ref,
+            "tenant_id": self.tenant_id,
             "shipper_id": self.shipper_id,
             "title": self.title,
             "origin": self.origin,
@@ -86,6 +88,7 @@ class Vehicle(Base):
 
     id = Column(Integer, primary_key=True)
     vehicle_id = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
     owner_id = Column(String(50), index=True)
     vehicle_type = Column(String(40))  # pickup|truck_small|truck_large|refrigerated_truck|flatbed|tanker|livestock_carrier
     capacity_kg = Column(Float)
@@ -113,6 +116,7 @@ class Vehicle(Base):
     def to_dict(self):
         return {
             "vehicle_id": self.vehicle_id,
+            "tenant_id": self.tenant_id,
             "owner_id": self.owner_id,
             "vehicle_type": self.vehicle_type,
             "capacity_kg": self.capacity_kg,
@@ -143,6 +147,7 @@ class Offer(Base):
     __tablename__ = "offers"
 
     id = Column(Integer, primary_key=True)
+    tenant_id = Column(String(50), index=True)
     load_ref = Column(String(50), index=True)
     bidder_id = Column(String(50), index=True)
     bidder_role = Column(String(30))  # transporter|vehicle_owner|logistics_manager
@@ -249,6 +254,7 @@ class Shipment(Base):
 
     id = Column(Integer, primary_key=True)
     shipment_id = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
     load_ref = Column(String(50), index=True)
     offer_id = Column(Integer)
     carrier_id = Column(String(50))
@@ -515,6 +521,7 @@ class Driver(Base):
 
     id = Column(Integer, primary_key=True)
     driver_id = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
     name = Column(String(120))
     owner_id = Column(String(50), index=True)
     region_code = Column(String(8))
@@ -534,6 +541,7 @@ class ServiceCenter(Base):
 
     id = Column(Integer, primary_key=True)
     center_id = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
     name = Column(String(160))
     owner_id = Column(String(50), index=True)
     region_code = Column(String(8))
@@ -631,6 +639,7 @@ class Consolidation(Base):
 
     id = Column(Integer, primary_key=True)
     consolidation_id = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
     origin_region = Column(String(8))
     destination_region = Column(String(8))
     load_refs = Column(JSON, default=list)
@@ -728,6 +737,7 @@ class Escrow(Base):
 
     id = Column(Integer, primary_key=True)
     escrow_id = Column(String(50), unique=True, nullable=False, index=True)
+    tenant_id = Column(String(50), index=True)
     shipment_id = Column(String(50), index=True)
     load_ref = Column(String(50))
     payer_id = Column(String(50))
@@ -881,3 +891,26 @@ class IdempotencyRecord(Base):
     status_code = Column(Integer)
     response_json = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class KycCheck(Base):
+    """Result of an automated document-verification / screening run."""
+
+    __tablename__ = "kyc_checks"
+
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, index=True)
+    entity_type = Column(String(20))
+    entity_id = Column(String(50))
+    provider = Column(String(40))
+    kind = Column(String(20))   # document|screening
+    verified = Column(Boolean)
+    status = Column(String(40))
+    details = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"id": self.id, "document_id": self.document_id, "entity_type": self.entity_type,
+                "entity_id": self.entity_id, "provider": self.provider, "kind": self.kind,
+                "verified": self.verified, "status": self.status, "details": self.details,
+                "created_at": self.created_at.isoformat() if self.created_at else None}

@@ -82,6 +82,11 @@ class Settings:
     sms_webhook_url: Optional[str] = None
     whatsapp_webhook_url: Optional[str] = None
     push_webhook_url: Optional[str] = None
+    # KYC / document-verification & sanctions-screening provider endpoints
+    kyc_endpoint: Optional[str] = None
+    sanctions_endpoint: Optional[str] = None
+    # Row-level multi-tenant isolation (scopes data by X-Tenant-ID)
+    tenant_isolation: bool = False
     # HTTP
     port: int = 5000
 
@@ -121,6 +126,9 @@ class Settings:
             sms_webhook_url=os.getenv("SMS_WEBHOOK_URL"),
             whatsapp_webhook_url=os.getenv("WHATSAPP_WEBHOOK_URL"),
             push_webhook_url=os.getenv("PUSH_WEBHOOK_URL"),
+            kyc_endpoint=os.getenv("KYC_ENDPOINT"),
+            sanctions_endpoint=os.getenv("SANCTIONS_ENDPOINT"),
+            tenant_isolation=_bool("TENANT_ISOLATION", False),
             port=_int("PORT", default_port),
         )
 

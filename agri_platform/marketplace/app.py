@@ -33,16 +33,16 @@ from ..common.channels import build_channels
 from ..common.eventbus import make_event_bus
 from ..common.holiday_provider import make_holiday_provider
 from . import (
-    calendar_service, compliance_service, demand, fleet, insurance, loads_planning,
+    calendar_service, compliance_service, demand, fleet, insurance, kyc, loads_planning,
     negotiation, payments, reputation, resilience, service, tax_service, telematics,
-    tracking, trust,
+    tenants, tracking, trust,
 )
 from .routing_client import make_traas_client
 from .models import (
     ApprovedAgency, Base, ComplianceDecision, ComplianceDocument, Consolidation,
     DelayReason, Driver, Escrow, Holiday, Inspection, InsuranceClaim, InsurancePolicy,
-    InsuranceRate, Load, NegotiationMessage, Offer, RegionComplianceRule, ServiceCenter,
-    Shipment, ShipmentEvent, TaxRule, TrackPoint, Vehicle,
+    InsuranceRate, KycCheck, Load, NegotiationMessage, Offer, RegionComplianceRule,
+    ServiceCenter, Shipment, ShipmentEvent, TaxRule, TrackPoint, Vehicle,
 )
 
 SERVICE_NAME = "lgaas"
@@ -81,6 +81,8 @@ def create_app(
     base_notifier = tracking_notifier or tracking.make_tracking_notifier(settings)
     app.config["TRACKING_NOTIFIER"] = tracking.CompositeNotifier([tracking.BusTrackingNotifier(bus), base_notifier])
     app.config["COMPLIANCE_ENFORCED"] = settings.compliance_enforced
+    app.config["TENANT_ISOLATION"] = settings.tenant_isolation
+    app.config["KYC_PROVIDER"] = kyc.make_kyc_provider(settings)
     app.config["PAYMENT_GATEWAY"] = payments.ManualGateway()
     app.config["CHANNELS"] = build_channels({
         "sms": getattr(settings, "sms_webhook_url", None),
@@ -114,13 +116,13 @@ def create_app(
         return app.config["SESSION_FACTORY"]()
 
     def _load_or_404(session, ref) -> Load:
-        load = session.query(Load).filter_by(ref=ref).first()
+        load = tenants.scope(session.query(Load), Load).filter(Load.ref == ref).first()
         if load is None:
             raise ApiError("load not found", status_code=404, code="not_found")
         return load
 
     def _offer_or_404(session, offer_id) -> Offer:
-        offer = session.query(Offer).filter_by(id=offer_id).first()
+        offer = tenants.scope(session.query(Offer), Offer).filter(Offer.id == offer_id).first()
         if offer is None:
             raise ApiError("offer not found", status_code=404, code="not_found")
         return offer
@@ -188,6 +190,7 @@ def create_app(
         session = db()
         if session.query(Load).filter_by(ref=load.ref).first():
             raise ApiError("load ref already exists", status_code=409, code="conflict")
+        tenants.stamp(load)
         session.add(load)
         session.commit()
         body = load.to_dict()
@@ -202,7 +205,7 @@ def create_app(
 
     @app.get("/api/loads")
     def list_loads():
-        q = db().query(Load).order_by(Load.id.desc())
+        q = tenants.scope(db().query(Load), Load).order_by(Load.id.desc())
         for field in ("status", "load_type", "shipper_id"):
             if request.args.get(field):
                 q = q.filter_by(**{field: request.args[field]})
@@ -321,13 +324,14 @@ def create_app(
             camera_serial=data.get("camera_serial"),
             compliance_status="pending",
         )
+        tenants.stamp(vehicle)
         session.add(vehicle)
         session.commit()
         return jsonify(vehicle.to_dict()), 201
 
     @app.get("/api/vehicles")
     def list_vehicles():
-        q = db().query(Vehicle).order_by(Vehicle.id.desc())
+        q = tenants.scope(db().query(Vehicle), Vehicle).order_by(Vehicle.id.desc())
         for field in ("owner_id", "vehicle_type"):
             if request.args.get(field):
                 q = q.filter_by(**{field: request.args[field]})
@@ -360,6 +364,8 @@ def create_app(
             )
         except ValueError as exc:
             raise ApiError(str(exc), status_code=422, code="validation_error")
+        if tenants.stamp(offer).tenant_id:
+            session.commit()
         return jsonify(offer.to_dict()), 201
 
     @app.get("/api/loads/<ref>/offers")
@@ -423,6 +429,10 @@ def create_app(
                 payer_id=load.shipper_id, payee_id=offer.bidder_id, amount=offer.price,
                 currency=offer.currency or load.currency or "USD",
                 gateway=app.config["PAYMENT_GATEWAY"])
+            if tenants.current_tenant():
+                tenants.stamp(shipment)
+                tenants.stamp(escrow)
+                session.commit()
         return jsonify(offer=offer.to_dict(), load=load.to_dict(),
                        shipment=shipment.to_dict() if shipment else None,
                        escrow=escrow.to_dict() if escrow else None)
@@ -673,14 +683,14 @@ def create_app(
 
     # --- shipment tracking -----------------------------------------------------
     def _shipment_or_404(session, sid) -> Shipment:
-        shipment = session.query(Shipment).filter_by(shipment_id=sid).first()
+        shipment = tenants.scope(session.query(Shipment), Shipment).filter(Shipment.shipment_id == sid).first()
         if shipment is None:
             raise ApiError("shipment not found", status_code=404, code="not_found")
         return shipment
 
     @app.get("/api/shipments")
     def list_shipments():
-        q = db().query(Shipment).order_by(Shipment.id.desc())
+        q = tenants.scope(db().query(Shipment), Shipment).order_by(Shipment.id.desc())
         for field in ("status", "load_ref", "carrier_id"):
             if request.args.get(field):
                 q = q.filter_by(**{field: request.args[field]})
@@ -889,6 +899,7 @@ def create_app(
                         region_code=data.get("region_code"),
                         experience_years=float(data.get("experience_years", 0) or 0),
                         compliance_status="pending")
+        tenants.stamp(driver)
         session.add(driver)
         session.commit()
         return jsonify(driver.to_dict()), 201
@@ -903,6 +914,7 @@ def create_app(
         center = ServiceCenter(center_id=data["center_id"], name=data.get("name"),
                                owner_id=data.get("owner_id"), region_code=data.get("region_code"),
                                compliance_status="pending")
+        tenants.stamp(center)
         session.add(center)
         session.commit()
         return jsonify(center.to_dict()), 201
@@ -924,8 +936,50 @@ def create_app(
             doc_hash=doc_hash, verified=bool(data.get("verified", False)))
         session = db()
         session.add(doc)
+        session.flush()
+        kyc_result = None
+        # Auto-verify via a configured KYC provider (manual provider verifies nothing).
+        if data.get("auto_verify", True):
+            kyc_result = _run_kyc(session, doc)
         session.commit()
-        return jsonify(doc.to_dict()), 201
+        body = doc.to_dict()
+        if kyc_result is not None:
+            body["kyc"] = kyc_result.to_dict()
+        return jsonify(body), 201
+
+    def _run_kyc(session, doc):
+        provider = app.config["KYC_PROVIDER"]
+        result = provider.verify_document(doc.to_dict())
+        if result.status not in ("manual_review_required",):
+            # Only a provider verdict changes the flag; manual leaves it as submitted.
+            doc.verified = result.verified
+        session.add(KycCheck(document_id=doc.id, entity_type=doc.entity_type, entity_id=doc.entity_id,
+                             provider=getattr(provider, "name", "manual"), kind="document",
+                             verified=result.verified, status=result.status, details=result.details))
+        return result
+
+    @app.post("/api/compliance/documents/<int:doc_id>/verify")
+    def verify_document(doc_id):
+        session = db()
+        doc = session.query(ComplianceDocument).filter_by(id=doc_id).first()
+        if doc is None:
+            raise ApiError("document not found", status_code=404, code="not_found")
+        result = _run_kyc(session, doc)
+        session.commit()
+        return jsonify(document=doc.to_dict(), kyc=result.to_dict())
+
+    @app.post("/api/compliance/screen")
+    def screen_identity():
+        data = get_json()
+        require(data, "name")
+        result = app.config["KYC_PROVIDER"].screen(data)
+        session = db()
+        session.add(KycCheck(entity_type=data.get("entity_type"), entity_id=data.get("entity_id"),
+                             provider=getattr(app.config["KYC_PROVIDER"], "name", "manual"),
+                             kind="screening", verified=result.clear, status=result.status,
+                             details={"hits": result.hits}))
+        session.commit()
+        return jsonify(result.to_dict())
 
     @app.post("/api/vehicles/<vid>/inspection")
     def add_inspection(vid):
