@@ -31,6 +31,9 @@ from .ai import InferenceClient, InferenceError, make_inference_client
 from .models import AlertPreference, Base, Drone, DroneMission, Farm, WeatherAlert
 from .notifications import ConsoleNotifier, Notifier, dispatch_alert, make_notifier
 
+SERVICE_NAME = "wfaas"
+BRAND = "prisaForecast"
+
 
 def _today() -> str:
     return date.today().isoformat()
@@ -65,7 +68,7 @@ def create_app(
     app.config["CACHE"] = cache or make_cache(settings.redis_url, settings.cache_ttl_seconds)
 
     # Cross-cutting middleware.
-    install_request_logging(app, "wfaas")
+    install_request_logging(app, SERVICE_NAME)
     install_auth(app, settings.api_keys, settings.auth_enabled)
     install_rate_limiting(app, RateLimiter(settings.rate_limit_per_minute))
     register_error_handlers(app)
@@ -91,7 +94,7 @@ def create_app(
     # --- health & readiness ----------------------------------------------------
     @app.get("/health")
     def health():
-        return jsonify(status="healthy", service="wfaas")
+        return jsonify(status="healthy", service=SERVICE_NAME, brand=BRAND)
 
     @app.get("/readyz")
     def readyz():
@@ -99,7 +102,7 @@ def create_app(
             db().execute(text("SELECT 1"))
         except Exception as exc:  # pragma: no cover - infra dependent
             return jsonify(status="not_ready", error=str(exc)), 503
-        return jsonify(status="ready", service="wfaas")
+        return jsonify(status="ready", service=SERVICE_NAME)
 
     # --- farms -----------------------------------------------------------------
     @app.post("/api/farms")

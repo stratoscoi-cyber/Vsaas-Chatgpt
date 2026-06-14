@@ -59,7 +59,8 @@ def client():
 
 
 def test_health(client):
-    assert client.get("/health").get_json()["service"] == "traas"
+    body = client.get("/health").get_json()
+    assert body["service"] == "traas" and body["brand"] == "prisaTravel"
 
 
 def test_safe_route(client):

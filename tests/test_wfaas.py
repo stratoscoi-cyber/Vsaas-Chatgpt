@@ -60,7 +60,8 @@ def client():
 
 
 def test_health(client):
-    assert client.get("/health").get_json()["status"] == "healthy"
+    body = client.get("/health").get_json()
+    assert body["status"] == "healthy" and body["brand"] == "prisaForecast"
 
 
 def test_register_and_get_farm(client):

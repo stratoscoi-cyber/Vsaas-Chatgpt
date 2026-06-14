@@ -20,6 +20,9 @@ from . import service
 from .models import Base, Hazard, Route, TransportConstraint
 from .routing import RoutingEngine, RoutingError, StraightLineEngine, ValhallaEngine
 
+SERVICE_NAME = "traas"
+BRAND = "prisaTravel"
+
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
@@ -48,7 +51,7 @@ def create_app(
     app.config["SESSION_FACTORY"] = session_factory
     app.config["ROUTING_ENGINE"] = routing_engine or _default_engine(settings)
 
-    install_request_logging(app, "traas")
+    install_request_logging(app, SERVICE_NAME)
     install_auth(app, settings.api_keys, settings.auth_enabled)
     install_rate_limiting(app, RateLimiter(settings.rate_limit_per_minute))
     register_error_handlers(app)
@@ -74,7 +77,7 @@ def create_app(
     # --- health & readiness ----------------------------------------------------
     @app.get("/health")
     def health():
-        return jsonify(status="healthy", service="traas")
+        return jsonify(status="healthy", service=SERVICE_NAME, brand=BRAND)
 
     @app.get("/readyz")
     def readyz():
@@ -82,7 +85,7 @@ def create_app(
             db().execute(text("SELECT 1"))
         except Exception as exc:  # pragma: no cover - infra dependent
             return jsonify(status="not_ready", error=str(exc)), 503
-        return jsonify(status="ready", service="traas")
+        return jsonify(status="ready", service=SERVICE_NAME)
 
     # --- routing ---------------------------------------------------------------
     @app.post("/api/routes/safe")

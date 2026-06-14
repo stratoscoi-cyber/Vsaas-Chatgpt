@@ -28,9 +28,12 @@ supply chains.
 
 | Service | Brand | Port | Responsibility |
 |---------|-------|------|----------------|
-| `agri_platform/wfaas` | — | 5001 | Weather forecasts, GDD, soil/weather alerts, drone missions + AI imagery analysis, background monitoring + notifications |
-| `agri_platform/traas` | — | 5002 | Hazard-aware routing, hazard zones, safety scoring, transit cost |
-| `agri_platform/marketplace` | **prisaMove** (LGaaS) | 5003 | Loads, vehicles, offers/bids, fair-rate pricing, AI culturally-aware haggling |
+| `agri_platform/wfaas` (WFAAS) | **prisaForecast** | 5001 | Weather forecasts, GDD, soil/weather alerts, drone missions + AI imagery analysis, background monitoring + notifications |
+| `agri_platform/traas` (TRAAS) | **prisaTravel** | 5002 | Hazard-aware routing, hazard zones, safety scoring, transit cost |
+| `agri_platform/marketplace` (LGaaS) | **prisaMove** | 5003 | Loads, vehicles, offers/bids, fair-rate pricing, AI culturally-aware haggling |
+
+The `prisa*` names are the customer-facing brands; each service's `/health`
+returns both its internal `service` id and its `brand`.
 
 Each service is independently deployable, owns its own database, and is built on
 the shared `agri_platform.common` core. Domain logic (geo math, GDD, pricing,
@@ -92,7 +95,7 @@ The URL comes from `$DATABASE_URL` (SQLite locally, Postgres in Docker).
 
 ## API reference
 
-### WFAAS — `:5001`
+### WFAAS / prisaForecast — `:5001`
 `GET /health` · `GET /readyz` · farms (`POST/GET /api/farms`, `GET /api/farms/{id}`,
 `POST /api/farms/{id}/drones`) · drones (`POST/GET /api/drones`,
 `POST /api/drones/missions`, `PUT /api/missions/{id}/result`,
@@ -101,7 +104,7 @@ The URL comes from `$DATABASE_URL` (SQLite locally, Postgres in Docker).
 `POST /api/alerts/{id}/resolve`, `POST/GET /api/alerts/preferences`) ·
 `POST /api/monitoring/scan`.
 
-### TRAAS — `:5002`
+### TRAAS / prisaTravel — `:5002`
 `GET /health` · `GET /readyz` · `POST /api/routes/safe` ·
 `POST /api/routes/optimize` (avoids active DB hazards; returns safety + cost) ·
 `POST /api/routes/analyze` · `POST /api/routes/distance` · `GET /api/routes` ·
